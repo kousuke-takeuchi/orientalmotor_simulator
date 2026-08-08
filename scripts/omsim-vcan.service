@@ -1,0 +1,12 @@
+[Unit]
+Description=omsim virtual CAN interface (vcan0)
+After=network-pre.target
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c '/usr/sbin/modprobe vcan && (/sbin/ip link show vcan0 || /sbin/ip link add dev vcan0 type vcan) && /sbin/ip link set up vcan0'
+
+[Install]
+WantedBy=multi-user.target
