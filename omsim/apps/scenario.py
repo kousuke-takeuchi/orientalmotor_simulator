@@ -72,16 +72,27 @@ def _matches(actual, step):
     return abs(actual - step["value"]) <= tolerance
 
 
-def _run_expect(remote, step, timeout):
+def _sdo_variable(remote, index, sub):
+    """符号・長さ・型を EDS のデータ型定義に従って canopen に任せる SDO 変数を返す。
+
+    サブインデックスを持たない単純変数（ODVariable）かつ sub=0 のときは
+    remote.sdo[index] を、それ以外（Record/Array やサブインデックス指定時）は
+    remote.sdo[index][sub] を返す。返り値の `.raw` で読み書きできる。
+    """
+    if sub == 0 and isinstance(remote.object_dictionary[index], canopen.objectdictionary.ODVariable):
+        return remote.sdo[index]
+    return remote.sdo[index][sub]
+
+
+def _run_expect(remote, node_id, step, timeout):
     deadline = time.monotonic() + timeout
     actual = None
     while time.monotonic() < deadline:
-        actual = remote.sdo.upload(step["index"], step["sub"])
-        actual = int.from_bytes(actual, "little", signed=False)
+        actual = _sdo_variable(remote, step["index"], step["sub"]).raw
         if _matches(actual, step):
-            return True, "actual={}".format(actual)
+            return True, "node{} actual={}".format(node_id, actual)
         time.sleep(0.01)
-    return False, "actual={} expected={}".format(actual, step["value"])
+    return False, "node{} actual={} expected={}".format(node_id, actual, step["value"])
 
 
 def run_scenario(scenario, network, timeout_default=2.0, eds=None):
@@ -100,16 +111,12 @@ def run_scenario(scenario, network, timeout_default=2.0, eds=None):
                     time.sleep(float(step.get("seconds", 0.0)))
                     break
                 elif kind == "sdo_write":
-                    remote.sdo.download(
-                        step["index"], step["sub"],
-                        int(step["value"]).to_bytes(
-                            len(remote.object_dictionary[step["index"]]) // 8, "little"),
-                    )
+                    _sdo_variable(remote, step["index"], step["sub"]).raw = step["value"]
                 elif kind == "sdo_read":
-                    remote.sdo.upload(step["index"], step["sub"])
+                    _sdo_variable(remote, step["index"], step["sub"]).raw
                 elif kind == "expect":
                     ok, detail = _run_expect(
-                        remote, step, float(step.get("timeout", timeout_default)))
+                        remote, node_id, step, float(step.get("timeout", timeout_default)))
                     if not ok:
                         break
                 elif kind == "pdo_send":
