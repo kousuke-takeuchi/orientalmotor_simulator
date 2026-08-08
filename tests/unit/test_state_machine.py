@@ -134,15 +134,14 @@ def test_quick_stop_active_ignores_repeated_quick_stop_command():
     assert sm.state == State.QUICK_STOP_ACTIVE
 
 
-def test_quick_stop_from_switched_on_does_not_change_state():
-    # Quick Stop の遷移元表 (HP-5143E 6, p34: Transitions 7, 10, 11) に
-    # switched-on は含まれないため、状態は変化しない。
-    sm = Cia402StateMachine()
-    sm.write_controlword(SHUTDOWN)
+def test_quick_stop_from_switched_on_moves_to_switch_on_disabled():
+    # HP-5143E 6 (p34) コマンド表 / 6.2 (p35) Transition 10:
+    # switched-on -> switch-on-disabled (Disable Voltage または Quick Stop)。
+    sm = enabled_machine()
     sm.write_controlword(SWITCH_ON)
     assert sm.state == State.SWITCHED_ON
     sm.write_controlword(QUICK_STOP)
-    assert sm.state == State.SWITCHED_ON
+    assert sm.state == State.SWITCH_ON_DISABLED
 
 
 def test_two_machines_are_independent():

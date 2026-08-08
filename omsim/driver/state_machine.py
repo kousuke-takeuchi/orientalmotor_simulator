@@ -126,14 +126,19 @@ class Cia402StateMachine(object):
             # HP-5143E 6 (p34) コマンド表: Quick Stop は Transitions 7, 10, 11
             # を起こす。6.2 (p35) より
             #   7:  ready-to-switch-on -> switch-on-disabled
+            #   10: switched-on -> switch-on-disabled
+            #       (Disable Voltage または Quick Stop のいずれでも発生)
             #   11: operation-enabled -> quick-stop-active
-            #   (10 は operation-enabled -> switch-on-disabled の代替経路だが
-            #    Quick stop option code 依存のため未実装。11 を採用)
-            # switched-on / switch-on-disabled / quick-stop-active 等は
-            # Quick Stop の遷移元として表に無いため状態を変えない。
+            # switch-on-disabled / quick-stop-active 等は Quick Stop の
+            # 遷移元として表に無いため状態を変えない。
+            # 注: 遷移表では QSTOP 信号入力・HWTO 信号入力でも同じ遷移が
+            # 起こるとされているが、これらの信号入力は P5 (CN4 入出力と
+            # 動力遮断機能) で実装予定であり、ここでは未対応。
             if self.state == State.OPERATION_ENABLED:
                 self.state = State.QUICK_STOP_ACTIVE
             elif self.state == State.READY_TO_SWITCH_ON:
+                self.state = State.SWITCH_ON_DISABLED
+            elif self.state == State.SWITCHED_ON:
                 self.state = State.SWITCH_ON_DISABLED
         elif command == "shutdown":
             if self.state in (
