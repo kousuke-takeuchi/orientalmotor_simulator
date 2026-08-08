@@ -50,6 +50,10 @@ class DriverModel(object):
         self.profile_deceleration_rpm_s = 1000.0
         self.velocity_window_rpm = 1.0
         self.velocity_threshold_rpm = 1.0
+        self.max_torque_permille = 10000
+        self.digital_outputs = 0
+        self.profile_velocity_rpm = 1
+        self.consumer_heartbeat_config = 0
 
     # --- 外向きの窓口は以下の 4 つだけ ---
 
@@ -219,6 +223,83 @@ class DriverModel(object):
     @router.reader(0x6077)
     def _read_torque_actual(self, sub):
         return _clamp_int32(round(self.plant.torque_permille))
+
+    @router.reader(0x6072)
+    def _read_max_torque(self, sub):
+        return self.max_torque_permille
+
+    @router.writer(0x6072)
+    def _write_max_torque(self, sub, value):
+        # EDS: LowLimit=0 HighLimit=10000 (千分率、1000 = 定格トルク)
+        if not (0 <= int(value) <= 10000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6072h は 0-10000")
+        self.max_torque_permille = int(value)
+
+    @router.reader(0x60FE, 1)
+    def _read_digital_outputs(self, sub):
+        return self.digital_outputs
+
+    @router.writer(0x60FE, 1)
+    def _write_digital_outputs(self, sub, value):
+        self.digital_outputs = int(value) & 0xFFFFFFFF
+
+    @router.reader(0x1003, 0)
+    def _read_error_field_count(self, sub):
+        return len(self.alarms.history)
+
+    @router.writer(0x1003, 0)
+    def _write_error_field_count(self, sub, value):
+        # CiA301: sub0 に 0 を書くとエラー履歴 (sub1..) をクリアする。
+        if int(value) != 0:
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "1003h sub0 は 0 のみ書き込み可")
+        self.alarms.clear_history()
+
+    def _read_error_field(self, sub):
+        history = self.alarms.history
+        if sub < 1 or sub > len(history):
+            return 0
+        return history[sub - 1]
+
+    for _sub in range(1, 11):
+        router.reader(0x1003, _sub)(_read_error_field)
+    del _sub
+
+    # --- メーカ固有 (pitakuru motor_control_node が実際に触れているもののみ) ---
+
+    @router.reader(0x4032)
+    def _read_direct_torque_limit(self, sub):
+        return self.max_torque_permille
+
+    @router.writer(0x4032)
+    def _write_direct_torque_limit(self, sub, value):
+        # EDS: LowLimit 記載無し。6072h と同じ千分率レンジとして扱う。
+        if not (0 <= int(value) <= 10000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "4032h は 0-10000")
+        self.max_torque_permille = int(value)
+
+    @router.reader(0x409B)
+    def _read_main_power_current(self, sub):
+        # 実測未対応。0 [mA] を返すだけの最小実装 (P6 でアラーム/電流モデルと統合)。
+        return 0
+
+    @router.reader(0x6081)
+    def _read_profile_velocity(self, sub):
+        return int(self.profile_velocity_rpm)
+
+    @router.writer(0x6081)
+    def _write_profile_velocity(self, sub, value):
+        if int(value) < 0:
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6081h は 0 以上")
+        self.profile_velocity_rpm = int(value)
+
+    @router.reader(0x1016, 1)
+    def _read_consumer_heartbeat_time(self, sub):
+        return self.consumer_heartbeat_config
+
+    @router.writer(0x1016, 1)
+    def _write_consumer_heartbeat_time(self, sub, value):
+        # PDO/Heartbeat consumer 自体は P3 まで未実装。値の保持のみ行う。
+        self.consumer_heartbeat_config = int(value) & 0xFFFFFFFF
 
     @router.reader(0x6083)
     def _read_profile_acceleration(self, sub):
