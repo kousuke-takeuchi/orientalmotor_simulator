@@ -202,6 +202,34 @@ def test_snapshot_exposes_the_monitor_values():
     assert snap["alarm_history"] == []
 
 
+def test_speed_bit_is_set_while_stopped():
+    model = enabled_model()
+    model.step(0.001)
+    assert model.read_object(0x6041) & (1 << 12)
+
+
+def test_speed_bit_clears_while_running_at_target():
+    model = enabled_model()
+    model.write_object(0x6083, 0, 6000)
+    model.write_object(0x6084, 0, 6000)
+    model.write_object(0x60FF, 0, 100)
+    run(model, 3.0)
+    assert not model.read_object(0x6041) & (1 << 12)
+
+
+def test_speed_bit_reflects_velocity_threshold():
+    model = enabled_model()
+    model.write_object(0x6083, 0, 6000)
+    model.write_object(0x6084, 0, 6000)
+    model.write_object(0x60FF, 0, 100)
+    run(model, 3.0)
+    assert not model.read_object(0x6041) & (1 << 12)
+
+    model.write_object(0x606F, 0, 200)  # 606Fh Velocity threshold = 200 r/min
+    model.step(0.001)
+    assert model.read_object(0x6041) & (1 << 12)
+
+
 def test_two_models_run_at_different_speeds():
     a = enabled_model()
     b = enabled_model()

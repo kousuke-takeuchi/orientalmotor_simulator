@@ -107,6 +107,18 @@ def test_statusword_reflects_flag_bits():
     assert sm.statusword & (1 << 4)  # voltage enabled は既定 True
 
 
+def test_operation_mode_specific_12_reflects_in_statusword():
+    # HP-5143E 7.2.4 (p39): pv での bit12 (SPD) は速度 0 かどうか。
+    # ステートマシン自体は意味を知らず、外から設定された値をそのまま bit12
+    # に反映するだけ。
+    sm = enabled_machine()
+    assert sm.statusword & (1 << 12) == 0
+    sm.operation_mode_specific_12 = True
+    assert sm.statusword & (1 << 12)
+    sm.operation_mode_specific_12 = False
+    assert sm.statusword & (1 << 12) == 0
+
+
 def test_voltage_disabled_drops_out_of_operation():
     sm = enabled_machine()
     sm.voltage_enabled = False

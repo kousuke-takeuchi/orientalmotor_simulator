@@ -35,6 +35,7 @@ BIT_WARNING = 7
 BIT_REMOTE = 9
 BIT_TARGET_REACHED = 10
 BIT_INTERNAL_LIMIT = 11
+BIT_OPERATION_MODE_SPECIFIC_12 = 12
 
 
 def _command(controlword):
@@ -64,6 +65,11 @@ class Cia402StateMachine(object):
         self.warning = False
         self.target_reached = False
         self.internal_limit_active = False
+        # HP-5143E 7.2.4 (p39): pv では bit12 (SPD) は「速度が 0 かどうか」
+        # (0: The speed is not 0. / 1: The speed is 0.)。モードごとに意味が
+        # 異なる (pp/hm/tq は P4 で対応) ため、モード側 (DriverModel) から
+        # 値を設定してもらう属性として持つ。既定は False (速度は 0 でない)。
+        self.operation_mode_specific_12 = False
         self.remote = True
         self._fault_active = False
         self._controlword = 0x0000
@@ -90,6 +96,8 @@ class Cia402StateMachine(object):
             word |= 1 << BIT_TARGET_REACHED
         if self.internal_limit_active:
             word |= 1 << BIT_INTERNAL_LIMIT
+        if self.operation_mode_specific_12:
+            word |= 1 << BIT_OPERATION_MODE_SPECIFIC_12
         return word
 
     def set_fault(self, active):

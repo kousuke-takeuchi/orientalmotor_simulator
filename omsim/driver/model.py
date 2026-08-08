@@ -66,8 +66,7 @@ class DriverModel(object):
             self.state_machine.set_fault(True)
         self.state_machine.step(dt)
 
-        excited = self.state_machine.is_operation_enabled
-        self.plant.excited = excited
+        excited = self._sync_excited()
 
         self.profile.acceleration = self.units.rpm_to_internal(
             self.profile_acceleration_rpm_s)
@@ -88,6 +87,26 @@ class DriverModel(object):
         self.state_machine.target_reached = (
             excited and self.profile.at_target and error_rpm <= self.velocity_window_rpm
         )
+
+        # HP-5143E 7.2.4 (p39): pv モードでの Statusword bit12 (SPD) は
+        # 「速度が 0 かどうか」= 実速度の絶対値が Velocity threshold (606Fh)
+        # 以下かどうか。
+        if self.mode == MODE_PV:
+            self.state_machine.operation_mode_specific_12 = (
+                abs(self.actual_velocity_rpm) <= self.velocity_threshold_rpm
+            )
+
+    def _sync_excited(self):
+        """励磁状態 (plant.excited) をステートマシンの現在の状態から同期する。
+
+        write_controlword() は state を同期的に遷移させるため、step() を
+        待たずに励磁状態も同期する必要がある（次の step() 呼び出し前に励磁
+        を観測するテストのため）。step() と _write_controlword() の両方
+        から呼ばれる共通処理。
+        """
+        excited = self.state_machine.is_operation_enabled
+        self.plant.excited = excited
+        return excited
 
     def snapshot(self):
         return {
@@ -143,10 +162,7 @@ class DriverModel(object):
     @router.writer(0x6040)
     def _write_controlword(self, sub, value):
         self.state_machine.write_controlword(int(value) & 0xFFFF)
-        # write_controlword() は state を同期的に遷移させるため、step() を
-        # 待たずに励磁状態も同期する（次の step() 呼び出し前に励磁を観測する
-        # テストのため）。
-        self.plant.excited = self.state_machine.is_operation_enabled
+        self._sync_excited()
 
     @router.reader(0x6041)
     def _read_statusword(self, sub):
