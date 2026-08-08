@@ -33,9 +33,36 @@ omsim 0.1.0
 
 ## 起動
 
+### コンソールスクリプトを使う（推奨）
+
+`pip install --user -e .` により、コンソールスクリプト `omsim` および `omsim-scenario` が `~/.local/bin` にインストールされます。
+
+**ログインシェルから実行する場合（通常の利用）:**
 ```bash
 omsim --channel vcan0 --node 1 --node 2
 ```
+
+**注意事項:**
+- `vagrant ssh` で VM にログインした場合は、上記のコマンドが直接使えます。
+- **プロビジョニング直後の同一セッションでは PATH に `~/.local/bin` が反映されていない可能性があります。**
+  その場合は以下のいずれかを実行してください:
+  - 一度 `exit` で SSH を切断してから `vagrant ssh` で再ログインする
+  - または、`source ~/.profile` を実行して PATH を再読み込みする
+
+### Python モジュール形式（常に動く・CI/CD 向け）
+
+非ログインシェル環境（`ssh host "コマンド"` 形式や自動化スクリプト）では、次の形式を使ってください:
+
+```bash
+python3 -m omsim.apps.omsim_main --channel vcan0 --node 1 --node 2
+```
+
+シナリオ実行の場合:
+```bash
+python3 -m omsim.apps.scenario tests/scenarios/sdo_smoke.yaml --junit junit.xml
+```
+
+この方法は PATH の影響を受けず、どの環境でも確実に動作します。
 
 ## テスト
 
@@ -63,12 +90,23 @@ vagrant ssh-config > /c/Users/ktake/code/keisuu/oriental_motor_simulator/.vm-ssh
 
 ## シナリオ実行
 
+**コンソールスクリプト形式:**
 ```bash
 omsim-scenario tests/scenarios/sdo_smoke.yaml --junit junit.xml
 ```
 
+**Python モジュール形式（常に動く）:**
+```bash
+python3 -m omsim.apps.scenario tests/scenarios/sdo_smoke.yaml --junit junit.xml
+```
+
 ## トラブルシューティング
 
+- **`omsim: command not found` になる場合**: コンソールスクリプト `omsim` / `omsim-scenario` は `~/.local/bin` に配置されます。
+  - **原因 1**: プロビジョニング直後、PATH が `~/.local/bin` を含んでいない可能性があります。
+    - 対処: `source ~/.profile` を実行するか、一度ログアウト・再ログインしてください。
+  - **原因 2**: 非ログインシェル（`ssh host "コマンド"` 形式）で実行している。
+    - 対処: `python3 -m omsim.apps.omsim_main` または `python3 -m omsim.apps.scenario` を使用してください。
 - **`chmod +x` が効かない**: VirtualBox の共有フォルダ（vboxsf）上ではファイルモードの変更が反映されない。
   実行ビットは Windows 側のリポジトリで `git update-index --chmod=+x <file>` を実行して立てる。
 - **VM を再起動すると `vcan0` が消える**: `vcan0` は永続デバイスではないため。
