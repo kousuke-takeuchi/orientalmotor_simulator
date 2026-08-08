@@ -1,0 +1,8 @@
+name: SDO で装置名とパラメータ既定値が読める
+nodes: [1, 2]
+steps:
+  - nmt: start
+  - sdo_read: {index: 0x1008}
+  - expect: {index: 0x414B, value: 1}
+  - wait: {seconds: 0.05}
+  - expect: {node: 2, index: 0x4186, value: 3000}
