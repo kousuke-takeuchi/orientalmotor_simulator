@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=45"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omsim"
+version = "0.1.0"
+description = "Oriental Motor BLVD-KRD CANopen driver simulator"
+requires-python = ">=3.8"
+dependencies = [
+    "canopen==2.4.1",
+    "python-can==4.5.0",
+    "PyYAML==6.0.2",
+]
+
+[project.scripts]
+omsim = "omsim.apps.omsim_main:main"
+omsim-scenario = "omsim.apps.scenario:main"
+
+[tool.setuptools.packages.find]
+include = ["omsim*"]

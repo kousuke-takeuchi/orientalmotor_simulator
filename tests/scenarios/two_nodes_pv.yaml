@@ -1,0 +1,15 @@
+name: 2 台に別々の速度を与えて独立に追従する
+nodes: [1, 2]
+steps:
+  - nmt: start
+  - sdo_write: {index: 0x6060, value: 3}
+  - sdo_write: {index: 0x6083, value: 6000}
+  - sdo_write: {index: 0x6084, value: 6000}
+  - sdo_write: {index: 0x6040, value: 0x0006}
+  - sdo_write: {index: 0x6040, value: 0x0007}
+  - sdo_write: {index: 0x6040, value: 0x000F}
+  - expect: {index: 0x6041, mask: 0x006F, value: 0x0027, timeout: 1.0}
+  - sdo_write: {node: 1, index: 0x60FF, value: 100}
+  - sdo_write: {node: 2, index: 0x60FF, value: 50}
+  - expect: {node: 1, index: 0x606C, value: 100, tolerance: 2, timeout: 3.0}
+  - expect: {node: 2, index: 0x606C, value: 50, tolerance: 2, timeout: 3.0}

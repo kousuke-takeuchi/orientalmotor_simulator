@@ -4,3 +4,5 @@ __pycache__/
 node_modules/
 dist/
 *.jsonl
+.vm-ssh-config
+*.egg-info/
