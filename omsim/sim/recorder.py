@@ -39,3 +39,33 @@ class Recorder(object):
         if self._handle is not None:
             self._handle.write(json.dumps(record, default=str) + "\n")
             self._handle.flush()
+
+
+class FrameListener(object):
+    """python-can の Listener。canopen.Network.listeners に載せる。"""
+
+    def __init__(self, recorder, clock):
+        self._recorder = recorder
+        self._clock = clock
+
+    def on_message_received(self, msg):
+        if getattr(msg, "is_error_frame", False):
+            return
+        self._recorder.frame("bus", msg.arbitration_id, bytes(msg.data), self._clock.now)
+
+    def on_error(self, exc):
+        pass
+
+    def stop(self):
+        pass
+
+
+def attach_recorder(network, recorder, clock):
+    listener = FrameListener(recorder, clock)
+    network.listeners.append(listener)
+    notifier = getattr(network, "notifier", None)
+    if notifier is not None:
+        # python-can 4.5.0 の Notifier は __init__ で listeners のコピーを取るため、
+        # connect() 後に network.listeners へ append しただけでは効かない。
+        notifier.add_listener(listener)
+    return listener
