@@ -4,9 +4,17 @@ import signal
 import sys
 
 from omsim.can.bus import close_network, open_network
+from omsim.driver.model import DriverModel
 from omsim.node.eds import DEFAULT_EDS_PATH, find_eds
 from omsim.sim.manager import NodeManager, NodeSpec
 from omsim.sim.recorder import Recorder, attach_recorder
+
+
+def format_stubs(stubs):
+    lines = []
+    for index, sub, reason in stubs:
+        lines.append("0x{:04X}:{:02X}  {}".format(index, sub, reason))
+    return lines
 
 
 def parse_args(argv):
@@ -24,6 +32,10 @@ def parse_args(argv):
     )
     parser.add_argument("--record", default=None, help="jsonl の記録先")
     parser.add_argument("--duration", type=float, default=None, help="指定秒で終了（テスト用）")
+    parser.add_argument(
+        "--list-stubs", action="store_true",
+        help="未実装（スタブ）オブジェクトの一覧を出力して終了する",
+    )
     args = parser.parse_args(argv)
 
     eds_path = find_eds(args.eds)
@@ -48,6 +60,12 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+
+    if args.list_stubs:
+        for line in format_stubs(DriverModel.router.stubs()):
+            print(line)
+        return 0
+
     recorder = Recorder(args.record)
     network = open_network(args.channel, args.interface, args.bitrate)
     manager = NodeManager(args.nodes, network=network, realtime=True)

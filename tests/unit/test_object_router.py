@@ -46,3 +46,33 @@ def test_unregistered_write_aborts_as_not_writable():
 def test_subindex_is_part_of_the_key():
     assert Fake.router.has_reader(0x6041, 0) is True
     assert Fake.router.has_reader(0x6041, 1) is False
+
+
+class FakeWithStub(object):
+    router = ObjectRouter()
+
+    def __init__(self):
+        self.value = 0
+
+    @router.reader(0x409B, stub="理由: 未実装")
+    def _read_stub(self, sub):
+        return self.value
+
+    @router.writer(0x1016, 1, stub="理由: 未実装2")
+    def _write_stub(self, sub, value):
+        self.value = value
+
+    @router.reader(0x1008)
+    def _read_normal(self, sub):
+        return "normal"
+
+
+def test_stubs_lists_registered_stub_handlers_with_reason():
+    stubs = FakeWithStub.router.stubs()
+    assert (0x409B, 0, "理由: 未実装") in stubs
+    assert (0x1016, 1, "理由: 未実装2") in stubs
+
+
+def test_stubs_does_not_include_non_stub_handlers():
+    keys = set((index, sub) for index, sub, _reason in FakeWithStub.router.stubs())
+    assert (0x1008, 0) not in keys

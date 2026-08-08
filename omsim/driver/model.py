@@ -50,7 +50,13 @@ class DriverModel(object):
         self.profile_deceleration_rpm_s = 1000.0
         self.velocity_window_rpm = 1.0
         self.velocity_threshold_rpm = 1.0
+        # 6072h Max torque（CiA402 標準）と 4032h Direct data operation
+        # torque limiting value（メーカ固有、ダイレクトデータ運転専用）は
+        # EDS 上も別オブジェクトであり、HP-5141J 第1章4節「トルク制限機能」
+        # の通り複数のトルク制限ソースが独立に存在し最小値で動作する設計。
+        # よって別々のインスタンス変数として保持する（共有しない）。
         self.max_torque_permille = 10000
+        self.direct_torque_limit_permille = 10000
         self.digital_outputs = 0
         self.profile_velocity_rpm = 1
         self.consumer_heartbeat_config = 0
@@ -62,6 +68,10 @@ class DriverModel(object):
 
     def write_object(self, index, sub=0, value=0):
         self.router.write(self, index, sub, value)
+
+    def stub_objects(self):
+        """[(index, sub, 理由), ...] 未実装スタブオブジェクトの一覧。"""
+        return self.router.stubs()
 
     def step(self, dt):
         self.sim_time += dt
@@ -235,11 +245,11 @@ class DriverModel(object):
             raise ObjectAccessError(ABORT_VALUE_RANGE, "6072h は 0-10000")
         self.max_torque_permille = int(value)
 
-    @router.reader(0x60FE, 1)
+    @router.reader(0x60FE, 1, stub="P5: HWTO/デジタル出力の意味付け未実装（値の保持のみ）")
     def _read_digital_outputs(self, sub):
         return self.digital_outputs
 
-    @router.writer(0x60FE, 1)
+    @router.writer(0x60FE, 1, stub="P5: HWTO/デジタル出力の意味付け未実装（値の保持のみ）")
     def _write_digital_outputs(self, sub, value):
         self.digital_outputs = int(value) & 0xFFFFFFFF
 
@@ -260,6 +270,8 @@ class DriverModel(object):
             return 0
         return history[sub - 1]
 
+    # sub1〜10 は全て同じ「履歴の sub 番目を返す」処理のため、
+    # 個別に @router.reader を書かずループでまとめて登録している。
     for _sub in range(1, 11):
         router.reader(0x1003, _sub)(_read_error_field)
     del _sub
@@ -268,37 +280,37 @@ class DriverModel(object):
 
     @router.reader(0x4032)
     def _read_direct_torque_limit(self, sub):
-        return self.max_torque_permille
+        return self.direct_torque_limit_permille
 
     @router.writer(0x4032)
     def _write_direct_torque_limit(self, sub, value):
         # EDS: LowLimit 記載無し。6072h と同じ千分率レンジとして扱う。
+        # 6072h (Max torque) とは別オブジェクト（HP-5141J 第1章4節の通り
+        # 独立したトルク制限ソース）のため、専用の変数に書く。
         if not (0 <= int(value) <= 10000):
             raise ObjectAccessError(ABORT_VALUE_RANGE, "4032h は 0-10000")
-        self.max_torque_permille = int(value)
+        self.direct_torque_limit_permille = int(value)
 
-    @router.reader(0x409B)
+    @router.reader(0x409B, stub="P6: 主電源電流のモデル未実装。常に 0 [mA] を返すだけ")
     def _read_main_power_current(self, sub):
-        # 実測未対応。0 [mA] を返すだけの最小実装 (P6 でアラーム/電流モデルと統合)。
         return 0
 
-    @router.reader(0x6081)
+    @router.reader(0x6081, stub="P4: pp (プロファイル位置) モード未実装。値の保持のみ")
     def _read_profile_velocity(self, sub):
         return int(self.profile_velocity_rpm)
 
-    @router.writer(0x6081)
+    @router.writer(0x6081, stub="P4: pp (プロファイル位置) モード未実装。値の保持のみ")
     def _write_profile_velocity(self, sub, value):
         if int(value) < 0:
             raise ObjectAccessError(ABORT_VALUE_RANGE, "6081h は 0 以上")
         self.profile_velocity_rpm = int(value)
 
-    @router.reader(0x1016, 1)
+    @router.reader(0x1016, 1, stub="P3: Heartbeat consumer 未実装。値の保持のみ")
     def _read_consumer_heartbeat_time(self, sub):
         return self.consumer_heartbeat_config
 
-    @router.writer(0x1016, 1)
+    @router.writer(0x1016, 1, stub="P3: Heartbeat consumer 未実装。値の保持のみ")
     def _write_consumer_heartbeat_time(self, sub, value):
-        # PDO/Heartbeat consumer 自体は P3 まで未実装。値の保持のみ行う。
         self.consumer_heartbeat_config = int(value) & 0xFFFFFFFF
 
     @router.reader(0x6083)
