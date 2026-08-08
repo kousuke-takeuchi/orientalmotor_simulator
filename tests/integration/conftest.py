@@ -55,6 +55,21 @@ def running_sim(vcan_available):
 
 
 @pytest.fixture
+def stepped_sim(vcan_available):
+    """テスト側が明示的に step を進めるシミュレータ（スレッドを使わない）。"""
+    network = open_network(channel=vcan_available)
+    specs = [
+        NodeSpec(node_id=1, eds=DEFAULT_EDS_PATH),
+        NodeSpec(node_id=2, eds=DEFAULT_EDS_PATH),
+    ]
+    manager = NodeManager(specs, network=network, realtime=False)
+    manager.start()
+    yield manager
+    manager.stop()
+    close_network(network)
+
+
+@pytest.fixture
 def master(vcan_available):
     """被試験体と同じ立場のマスタ。"""
     network = open_network(channel=vcan_available)

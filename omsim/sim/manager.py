@@ -28,6 +28,8 @@ class NodeManager(object):
             return
         for node in self.nodes.values():
             self.network[node.id] = node
+            # 実機と同様、初期化後は自律的に PRE-OPERATIONAL へ遷移する。
+            node.nmt.state = "PRE-OPERATIONAL"
         self._started = True
 
     def stop(self):
