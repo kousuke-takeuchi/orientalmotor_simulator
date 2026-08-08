@@ -46,6 +46,10 @@ def running_sim(vcan_available):
     yield manager
     stop.set()
     thread.join(timeout=2.0)
+    if thread.is_alive():
+        manager.stop()
+        close_network(network)
+        pytest.fail("シミュレータのスレッドが 2 秒以内に停止しませんでした")
     manager.stop()
     close_network(network)
 
