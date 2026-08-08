@@ -42,8 +42,27 @@ class NodeManager(object):
 
     def step(self):
         dt = self.clock.advance()
-        for model in self.models.values():
+        for node_id, model in self.models.items():
             model.step(dt)
+            self._drain_emcy(node_id, model)
+
+    def _drain_emcy(self, node_id, model):
+        """AlarmModel に溜まった EMCY をバスへ送出する。
+
+        network が無い（または start() 前で node がまだ Network に紐付いて
+        いない）場合は送信先が無いため何もしない。この場合でもキューには
+        積まれたままになるが、network 無しの利用形態（単体テスト等）では
+        アラームを注入しない前提のため問題にならない。
+        """
+        if self.network is None or not self._started:
+            return
+        node = self.nodes[node_id]
+        while True:
+            pending = model.alarms.pop_pending_emcy()
+            if pending is None:
+                return
+            emcy_code, error_register = pending
+            node.emcy.send(emcy_code, error_register)
 
     def run_for(self, seconds):
         steps = int(round(seconds / SimClock.STEP_SECONDS))

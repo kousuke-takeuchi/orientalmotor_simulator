@@ -1,6 +1,10 @@
 import pytest
 
-from omsim.driver.errors import ObjectAccessError
+from omsim.driver.errors import (
+    ABORT_DEVICE_STATE,
+    NotImplementedObjectError,
+    ObjectAccessError,
+)
 from omsim.driver.model import MODE_PV, DriverModel
 from omsim.driver.state_machine import State
 
@@ -31,8 +35,14 @@ def test_mode_display_follows_mode_of_operation():
 
 def test_unsupported_mode_is_reported_as_not_implemented():
     model = DriverModel(node_id=1)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedObjectError) as exc:
         model.write_object(0x6060, 0, 1)
+    # NotImplementedObjectError は ObjectAccessError のサブクラスなので
+    # od_bridge.py の SDO abort への変換対象に入る（生の NotImplementedError
+    # は変換対象外で汎用 abort に潰れ、メッセージが消えていた）。
+    assert isinstance(exc.value, ObjectAccessError)
+    assert exc.value.abort_code == ABORT_DEVICE_STATE
+    assert "1" in str(exc.value)
 
 
 def test_statusword_shows_operation_enabled():
@@ -171,11 +181,28 @@ def test_alarm_stops_the_motor():
     assert abs(model.read_object(0x606C)) <= 1
 
 
-def test_alarm_reset_via_40c0_clears_the_fault():
+def test_alarm_reset_via_40c0_raises_while_cause_persists():
+    # 修正2: 原因が解消していない間は 40C0h への書き込みが SDO 成功を装って
+    # 何もしない、という嘘を止める。ObjectAccessError で abort させる。
     model = enabled_model()
     model.inject_alarm(0x30, 0x2310)
     run(model, 0.01)
-    model.alarms.set_cause_cleared(True)
+    with pytest.raises(ObjectAccessError) as exc:
+        model.write_object(0x40C0, 0, 1)
+    assert exc.value.abort_code == ABORT_DEVICE_STATE
+    # Fault から抜けられていないことも確認する。
+    assert model.read_object(0x6041) & 0x4F == 0x08
+    assert model.read_object(0x603F) == 0x2310
+
+
+def test_alarm_reset_via_40c0_clears_the_fault():
+    # 「2 段階で復帰する」(40C0h でアラーム解除 -> 6040h Fault reset の
+    # 立ち上がりで switch-on-disabled へ) という検証内容自体は維持する。
+    # 原因の解消は公開 API の clear_alarm_cause() を経由するように変更した。
+    model = enabled_model()
+    model.inject_alarm(0x30, 0x2310)
+    run(model, 0.01)
+    model.clear_alarm_cause()
     model.write_object(0x40C0, 0, 1)
     model.write_object(0x6040, 0, 0x0000)
     model.write_object(0x6040, 0, 0x0080)
@@ -242,3 +269,38 @@ def test_two_models_run_at_different_speeds():
         b.step(0.001)
     assert abs(a.read_object(0x606C) - 100) <= 1
     assert abs(b.read_object(0x606C) - 50) <= 1
+
+
+# --- 修正4: Quick stop (605Ah) の既定挙動 (Transition 12) ---
+
+def test_quick_stop_ramps_down_and_exits_to_switch_on_disabled():
+    model = enabled_model()
+    model.write_object(0x6083, 0, 6000)
+    model.write_object(0x6084, 0, 6000)
+    model.write_object(0x60FF, 0, 100)
+    run(model, 1.0)
+    assert abs(model.read_object(0x606C) - 100) <= 1
+
+    model.write_object(0x6040, 0, 0x0002)  # Quick stop
+    model.step(0.001)
+    assert model.state_machine.state == State.QUICK_STOP_ACTIVE
+
+    run(model, 5.0)
+    assert model.state_machine.state == State.SWITCH_ON_DISABLED
+    assert abs(model.read_object(0x606C)) <= 1
+
+
+def test_quick_stop_option_code_is_stubbed():
+    keys = set((index, sub) for index, sub, _reason in DriverModel.router.stubs())
+    assert (0x605A, 0) in keys
+
+
+def test_torque_limit_objects_are_stubbed():
+    keys = set((index, sub) for index, sub, _reason in DriverModel.router.stubs())
+    assert (0x6072, 0) in keys
+    assert (0x4032, 0) in keys
+
+
+def test_nmt_reset_is_stubbed():
+    keys = set((index, sub) for index, sub, _reason in DriverModel.router.stubs())
+    assert (0x0000, 0x81) in keys

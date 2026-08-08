@@ -17,6 +17,25 @@ def format_stubs(stubs):
     return lines
 
 
+def warn_ignored_mxex(nodes, stream=None):
+    """--node ID=MXEX で mxex が指定されたノードについて、まだ読み込まれない
+    ことを標準エラー出力に警告する。
+
+    mxex ローダは P5 で実装予定 (現状は NodeSpec.mxex に文字列を保持する
+    だけで、どこからも読まれない)。黙って無視すると「右/左で違う mxex を
+    渡したつもりが両ノード同一設定で動く」という気付きにくい事故になる。
+    """
+    stream = sys.stderr if stream is None else stream
+    for spec in nodes:
+        if spec.mxex:
+            print(
+                "警告: mxex の読み込みは P5 で実装予定のため、"
+                "node_id={} に指定された {} は無視されます".format(
+                    spec.node_id, spec.mxex),
+                file=stream,
+            )
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(prog="omsim", description="BLVD-KRD CANopen シミュレータ")
     parser.add_argument("--channel", default="vcan0")
@@ -65,6 +84,8 @@ def main(argv=None):
         for line in format_stubs(DriverModel.router.stubs()):
             print(line)
         return 0
+
+    warn_ignored_mxex(args.nodes)
 
     recorder = Recorder(args.record)
     network = open_network(args.channel, args.interface, args.bitrate)

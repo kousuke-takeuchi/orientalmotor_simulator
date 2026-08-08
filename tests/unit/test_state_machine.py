@@ -156,6 +156,20 @@ def test_quick_stop_from_switched_on_moves_to_switch_on_disabled():
     assert sm.state == State.SWITCH_ON_DISABLED
 
 
+def test_stop_completed_transitions_quick_stop_active_to_switch_on_disabled():
+    sm = enabled_machine()
+    sm.write_controlword(QUICK_STOP)
+    assert sm.state == State.QUICK_STOP_ACTIVE
+    sm.stop_completed()
+    assert sm.state == State.SWITCH_ON_DISABLED
+
+
+def test_stop_completed_is_a_noop_outside_quick_stop_active():
+    sm = enabled_machine()
+    sm.stop_completed()
+    assert sm.state == State.OPERATION_ENABLED
+
+
 def test_two_machines_are_independent():
     a, b = enabled_machine(), Cia402StateMachine()
     b.step(0.001)

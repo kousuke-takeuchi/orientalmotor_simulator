@@ -76,3 +76,11 @@ def test_stubs_lists_registered_stub_handlers_with_reason():
 def test_stubs_does_not_include_non_stub_handlers():
     keys = set((index, sub) for index, sub, _reason in FakeWithStub.router.stubs())
     assert (0x1008, 0) not in keys
+
+
+def test_mark_stub_registers_an_entry_without_a_reader_or_writer():
+    router = ObjectRouter()
+    router.mark_stub(0x0000, 0x81, "理由: OD 外の機能")
+    assert (0x0000, 0x81, "理由: OD 外の機能") in router.stubs()
+    assert router.has_reader(0x0000, 0x81) is False
+    assert router.has_writer(0x0000, 0x81) is False

@@ -1,6 +1,6 @@
 import pytest
 
-from omsim.apps.omsim_main import main, parse_args
+from omsim.apps.omsim_main import main, parse_args, warn_ignored_mxex
 from omsim.driver.model import DriverModel
 
 
@@ -48,6 +48,24 @@ def test_parses_list_stubs_flag():
 def test_list_stubs_defaults_to_false():
     args = parse_args([])
     assert args.list_stubs is False
+
+
+def test_warn_ignored_mxex_warns_for_nodes_with_mxex(capsys):
+    args = parse_args(["--node", "2=/tmp/left.mxex", "--node", "1"])
+    warn_ignored_mxex(args.nodes)
+    captured = capsys.readouterr()
+    assert "left.mxex" in captured.err
+    assert "P5" in captured.err
+    assert "node_id=2" in captured.err
+    # mxex を指定していないノード (node_id=1) については警告しない。
+    assert "node_id=1" not in captured.err
+
+
+def test_warn_ignored_mxex_is_silent_without_mxex(capsys):
+    args = parse_args(["--node", "1", "--node", "2"])
+    warn_ignored_mxex(args.nodes)
+    captured = capsys.readouterr()
+    assert captured.err == ""
 
 
 def test_list_stubs_prints_stub_lines_and_exits_without_opening_network(capsys):

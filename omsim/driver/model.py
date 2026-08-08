@@ -3,7 +3,12 @@
 参照: HP-5143E 7.2 Profile Velocity Mode (p37)、HP-5141J 第1章 (p12-48)
 """
 from omsim.driver.alarm_model import AlarmModel
-from omsim.driver.errors import ABORT_VALUE_RANGE, ObjectAccessError
+from omsim.driver.errors import (
+    ABORT_DEVICE_STATE,
+    ABORT_VALUE_RANGE,
+    NotImplementedObjectError,
+    ObjectAccessError,
+)
 from omsim.driver.motor_plant import MotorPlant
 from omsim.driver.objects import ObjectRouter
 from omsim.driver.profile import TrapezoidProfile
@@ -60,6 +65,9 @@ class DriverModel(object):
         self.digital_outputs = 0
         self.profile_velocity_rpm = 1
         self.consumer_heartbeat_config = 0
+        # 605Ah Quick stop option code: 未実装 (P5)。値は保持するのみで、
+        # 挙動には反映しない（常に既定の「減速完了で switch-on-disabled」）。
+        self.quick_stop_option_code = 2
 
     # --- 外向きの窓口は以下の 4 つだけ ---
 
@@ -110,6 +118,18 @@ class DriverModel(object):
                 abs(self.actual_velocity_rpm) <= self.velocity_threshold_rpm
             )
 
+        # HP-5143E 6.2 (p35) Transition 12: quick-stop-active はクイック
+        # ストップの減速完了 (指令・実速度ともに 0 付近) で switch-on-disabled
+        # へ自動的に抜ける。605Ah Quick stop option code は未実装 (P5) の
+        # ため、常にこの既定動作のみを行う。
+        if self.state_machine.state == State.QUICK_STOP_ACTIVE:
+            stopped = (
+                self.profile.command == 0.0
+                and abs(self.actual_velocity_rpm) <= self.velocity_threshold_rpm
+            )
+            if stopped:
+                self.state_machine.stop_completed()
+
     def _sync_excited(self):
         """励磁状態 (plant.excited) をステートマシンの現在の状態から同期する。
 
@@ -142,6 +162,15 @@ class DriverModel(object):
 
     def inject_alarm(self, alarm_code, emcy_code, error_register=0x21):
         self.alarms.raise_alarm(alarm_code, emcy_code, error_register)
+
+    def clear_alarm_cause(self):
+        """注入したアラームの原因が解消したことを外から通知する。
+
+        実機では過負荷が収まる等に相当する。これを呼ばない限り 40C0h への
+        アラームリセット書き込みは ObjectAccessError (ABORT_DEVICE_STATE) で
+        失敗する（原因が続いている間は実機でもリセットできないため）。
+        """
+        self.alarms.set_cause_cleared(True)
 
     # --- 派生値 ---
 
@@ -190,8 +219,9 @@ class DriverModel(object):
     def _write_mode(self, sub, value):
         mode = int(value)
         if mode != MODE_PV:
-            raise NotImplementedError(
-                "運転モード {} は P4 で実装する (6060h)".format(mode))
+            raise NotImplementedObjectError(
+                ABORT_DEVICE_STATE,
+                "運転モード {} は未実装 (P4 で実装予定, 6060h)".format(mode))
         self.mode = mode
 
     @router.reader(0x6061)
@@ -234,11 +264,16 @@ class DriverModel(object):
     def _read_torque_actual(self, sub):
         return _clamp_int32(round(self.plant.torque_permille))
 
-    @router.reader(0x6072)
+    _TORQUE_LIMIT_STUB_REASON = (
+        "P4/P5: 値は保持・読み返しできるが MotorPlant がトルク制限を"
+        "一切参照しないため、運転(速度追従)には効かない"
+    )
+
+    @router.reader(0x6072, stub=_TORQUE_LIMIT_STUB_REASON)
     def _read_max_torque(self, sub):
         return self.max_torque_permille
 
-    @router.writer(0x6072)
+    @router.writer(0x6072, stub=_TORQUE_LIMIT_STUB_REASON)
     def _write_max_torque(self, sub, value):
         # EDS: LowLimit=0 HighLimit=10000 (千分率、1000 = 定格トルク)
         if not (0 <= int(value) <= 10000):
@@ -278,11 +313,11 @@ class DriverModel(object):
 
     # --- メーカ固有 (pitakuru motor_control_node が実際に触れているもののみ) ---
 
-    @router.reader(0x4032)
+    @router.reader(0x4032, stub=_TORQUE_LIMIT_STUB_REASON)
     def _read_direct_torque_limit(self, sub):
         return self.direct_torque_limit_permille
 
-    @router.writer(0x4032)
+    @router.writer(0x4032, stub=_TORQUE_LIMIT_STUB_REASON)
     def _write_direct_torque_limit(self, sub, value):
         # EDS: LowLimit 記載無し。6072h と同じ千分率レンジとして扱う。
         # 6072h (Max torque) とは別オブジェクト（HP-5141J 第1章4節の通り
@@ -333,6 +368,20 @@ class DriverModel(object):
             raise ObjectAccessError(ABORT_VALUE_RANGE, "6084h は 1 以上")
         self.profile_deceleration_rpm_s = float(value)
 
+    _QUICK_STOP_OPTION_STUB_REASON = (
+        "P5: Quick stop option code 未実装。605Ah の値によらず、常に通常の"
+        "減速度 (6084h) でクイックストップし、停止完了で switch-on-disabled "
+        "へ抜ける既定動作のみを行う（6085h Quick stop deceleration も未実装）"
+    )
+
+    @router.reader(0x605A, stub=_QUICK_STOP_OPTION_STUB_REASON)
+    def _read_quick_stop_option_code(self, sub):
+        return self.quick_stop_option_code
+
+    @router.writer(0x605A, stub=_QUICK_STOP_OPTION_STUB_REASON)
+    def _write_quick_stop_option_code(self, sub, value):
+        self.quick_stop_option_code = int(value)
+
     @router.reader(0x608F, 1)
     def _read_encoder_increments(self, sub):
         return self.units.encoder_increments
@@ -382,6 +431,17 @@ class DriverModel(object):
     @router.writer(0x40C0)
     def _write_alarm_reset(self, sub, value):
         if int(value):
-            self.alarms.reset()
-            if not self.alarms.is_active:
-                self.state_machine.set_fault(False)
+            if not self.alarms.reset():
+                raise ObjectAccessError(
+                    ABORT_DEVICE_STATE,
+                    "40C0h: アラームの原因が解消していないため解除できません"
+                    "（clear_alarm_cause() が呼ばれていない）")
+            self.state_machine.set_fault(False)
+
+    router.mark_stub(
+        0x0000, 0x81,
+        "P3: NMT reset (0x81) は canopen.NmtSlave が通信状態のみ処理し、"
+        "DriverModel の状態（アラーム/ステートマシン/パラメータ等）には"
+        "何も伝わらない。配線 (reset 受信時に DriverModel を初期化し直す) "
+        "は P3 で実施予定"
+    )

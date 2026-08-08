@@ -100,6 +100,18 @@ class Cia402StateMachine(object):
             word |= 1 << BIT_OPERATION_MODE_SPECIFIC_12
         return word
 
+    def stop_completed(self):
+        """HP-5143E 6.2 (p35) Transition 12: quick-stop-active でのクイック
+        ストップ完了により switch-on-disabled へ抜ける。
+
+        605Ah Quick stop option code は未実装 (P5) のため、値によらず常に
+        この既定動作（減速完了で switch-on-disabled へ抜ける）だけを行う。
+        呼び出し側 (DriverModel.step()) が「停止した」と判断したタイミングで
+        呼ぶ。quick-stop-active 以外では何もしない。
+        """
+        if self.state == State.QUICK_STOP_ACTIVE:
+            self.state = State.SWITCH_ON_DISABLED
+
     def set_fault(self, active):
         self._fault_active = active
         if active and self.state not in (State.FAULT, State.FAULT_REACTION_ACTIVE):

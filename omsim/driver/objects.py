@@ -28,6 +28,14 @@ class ObjectRouter(object):
 
         return decorate
 
+    def mark_stub(self, index, sub, reason):
+        """reader/writer を伴わない項目をスタブとして登録する。
+
+        NMT reset のように OD の read/write を経由しない機能でも、
+        「まだ嘘」であることを --list-stubs で機械的に確認できるようにする。
+        """
+        self._stubs[(index, sub)] = reason
+
     def has_reader(self, index, sub=0):
         return (index, sub) in self._readers
 
