@@ -2,6 +2,8 @@
 import collections
 import json
 
+import can
+
 from omsim.sim.decode import describe_frame
 
 
@@ -41,8 +43,14 @@ class Recorder(object):
             self._handle.flush()
 
 
-class FrameListener(object):
-    """python-can の Listener。canopen.Network.listeners に載せる。"""
+class FrameListener(can.Listener):
+    """python-can の Listener。canopen.Network.listeners に載せる。
+
+    python-can 4.5.0 の Notifier は受信のたびに listener(msg) という
+    呼び出し可能形式でリスナーを呼ぶ（listener.on_message_received(msg) では
+    ない）。can.Listener を継承していないと __call__ を持たず
+    TypeError になって受信スレッドごと止まる（実機で発見されたバグ）。
+    """
 
     def __init__(self, recorder, clock):
         self._recorder = recorder
@@ -54,9 +62,9 @@ class FrameListener(object):
         self._recorder.frame("bus", msg.arbitration_id, bytes(msg.data), self._clock.now)
 
     def on_error(self, exc):
-        pass
-
-    def stop(self):
+        # 受信スレッドを落とさないよう握りつぶす。基底の can.Listener.on_error は
+        # NotImplementedError を投げる実装のため、オーバーライドしないと
+        # 個別のバスエラーで Notifier のスレッド自体が停止してしまう。
         pass
 
 
