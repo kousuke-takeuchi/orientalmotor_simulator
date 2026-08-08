@@ -14,7 +14,10 @@ class State(object):
 
 # HP-5143E 6.1 (p34): Statusword (6041h) 下位ビットの状態コード (mask, value)。
 # bit0=Ready to Switch ON, bit1=Switched ON, bit2=Operation Enabled, bit3=Fault,
-# bit5=Quick Stop, bit6=Switch ON Disabled は同ページのビット表と一致を確認済み。
+# bit5=Quick Stop, bit6=Switch ON Disabled は pdftotext -raw 抽出のビット表
+# (6.1, p34) と照合済み。ページ番号・ビット番号の対応は確認できたが、各状態の
+# 実際のビット値 (0x00/0x40/0x21/0x23/0x27/0x07/0x0F/0x08) は pdftotext では
+# 表の数値セルが崩れて再現できず、目視でのビット表との整合から復元したもの。
 _STATE_CODE = {
     State.NOT_READY: (0x4F, 0x00),
     State.SWITCH_ON_DISABLED: (0x4F, 0x40),
@@ -26,7 +29,7 @@ _STATE_CODE = {
     State.FAULT: (0x4F, 0x08),
 }
 
-# HP-5143E 6.1 (p34) のビット表と一致を確認済み。
+# HP-5143E 6.1 (p34) のビット表 (pdftotext -raw 抽出) のビット番号と一致を確認済み。
 BIT_VOLTAGE_ENABLED = 4
 BIT_WARNING = 7
 BIT_REMOTE = 9
@@ -37,7 +40,9 @@ BIT_INTERNAL_LIMIT = 11
 def _command(controlword):
     """HP-5143E 6 (p34) の Controlword コマンド表
     (Fault reset=bit7, Enable operation=bit3, Quick stop=bit2,
-    Enable voltage=bit1, Switched on=bit0) と一致を確認済み。
+    Enable voltage=bit1, Switched on=bit0) のビットマスクは pdftotext -raw
+    抽出のコマンド表 (Shutdown/Switch ON/Disable Voltage/Quick Stop/
+    Disable Operation/Enable Operation/Fault Reset の各行) と照合済み。
     """
     if controlword & 0x87 == 0x06:
         return "shutdown"
@@ -92,16 +97,20 @@ class Cia402StateMachine(object):
         if active and self.state not in (State.FAULT, State.FAULT_REACTION_ACTIVE):
             self.state = State.FAULT_REACTION_ACTIVE
 
+    def _auto_transition_from_not_ready(self):
+        """HP-5143E 6.2 (p35) Transitions 0-1: 電源投入直後の自動遷移
+        (not-ready-to-switch-on -> switch-on-disabled) は Controlword を
+        待たない。step() と write_controlword() の両方から呼ばれる共通処理。
+        """
+        if self.state == State.NOT_READY:
+            self.state = State.SWITCH_ON_DISABLED
+
     def write_controlword(self, value):
         previous = self._controlword
         self._controlword = value
         rising_fault_reset = bool(value & 0x80) and not (previous & 0x80)
 
-        # HP-5143E 6.2 (p35) Transitions 0-2: 電源投入直後の自動遷移
-        # (not-ready-to-switch-on -> switch-on-disabled) は Controlword を
-        # 待たない。step() と同じ自動遷移を write_controlword でも行う。
-        if self.state == State.NOT_READY:
-            self.state = State.SWITCH_ON_DISABLED
+        self._auto_transition_from_not_ready()
 
         if self.state == State.FAULT:
             if rising_fault_reset and not self._fault_active:
@@ -114,9 +123,17 @@ class Cia402StateMachine(object):
         if command == "disable-voltage":
             self.state = State.SWITCH_ON_DISABLED
         elif command == "quick-stop":
+            # HP-5143E 6 (p34) コマンド表: Quick Stop は Transitions 7, 10, 11
+            # を起こす。6.2 (p35) より
+            #   7:  ready-to-switch-on -> switch-on-disabled
+            #   11: operation-enabled -> quick-stop-active
+            #   (10 は operation-enabled -> switch-on-disabled の代替経路だが
+            #    Quick stop option code 依存のため未実装。11 を採用)
+            # switched-on / switch-on-disabled / quick-stop-active 等は
+            # Quick Stop の遷移元として表に無いため状態を変えない。
             if self.state == State.OPERATION_ENABLED:
                 self.state = State.QUICK_STOP_ACTIVE
-            else:
+            elif self.state == State.READY_TO_SWITCH_ON:
                 self.state = State.SWITCH_ON_DISABLED
         elif command == "shutdown":
             if self.state in (
@@ -132,7 +149,7 @@ class Cia402StateMachine(object):
 
     def step(self, dt):
         if self.state == State.NOT_READY:
-            self.state = State.SWITCH_ON_DISABLED
+            self._auto_transition_from_not_ready()
             return
         if self.state == State.FAULT_REACTION_ACTIVE:
             self.state = State.FAULT
