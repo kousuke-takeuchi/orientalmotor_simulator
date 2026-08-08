@@ -1,10 +1,13 @@
 """CAN フレームと状態スナップショットを jsonl に記録する。"""
 import collections
 import json
+import logging
 
 import can
 
 from omsim.sim.decode import describe_frame
+
+logger = logging.getLogger(__name__)
 
 
 class Recorder(object):
@@ -65,7 +68,7 @@ class FrameListener(can.Listener):
         # 受信スレッドを落とさないよう握りつぶす。基底の can.Listener.on_error は
         # NotImplementedError を投げる実装のため、オーバーライドしないと
         # 個別のバスエラーで Notifier のスレッド自体が停止してしまう。
-        pass
+        logger.error("CAN bus error: %s", exc, exc_info=True)
 
 
 def attach_recorder(network, recorder, clock):
