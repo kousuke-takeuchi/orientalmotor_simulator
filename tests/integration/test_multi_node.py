@@ -46,6 +46,8 @@ def test_fault_on_one_node_does_not_stop_the_other(stepped_sim):
     assert abs(one.read_object(0x606C)) <= 2
     assert abs(two.read_object(0x606C) - 100) <= 2
     assert two.read_object(0x6041) & 0x6F == 0x27
+    # 障害を注入した側 (one) が実際に Fault 状態になっていることを直接検証する。
+    assert one.read_object(0x6041) & 0x4F == 0x08
 
 
 def test_removing_excitation_on_one_node_does_not_affect_the_other(stepped_sim):
@@ -60,6 +62,10 @@ def test_removing_excitation_on_one_node_does_not_affect_the_other(stepped_sim):
 
     assert abs(one.read_object(0x606C)) <= 2
     assert abs(two.read_object(0x606C) - 100) <= 2
+    # 励磁を落とした側 (one) が実際に switch-on-disabled かつ
+    # Voltage Enabled ビットが落ちていることを直接検証する。
+    assert one.read_object(0x6041) & 0x4F == 0x40
+    assert one.read_object(0x6041) & (1 << 4) == 0
 
 
 def test_parameters_do_not_leak_between_nodes(stepped_sim):

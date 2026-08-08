@@ -3,7 +3,7 @@ import collections
 
 from omsim.driver.model import DriverModel
 from omsim.node.eds import load_eds
-from omsim.node.od_bridge import build_local_node
+from omsim.node.od_bridge import boot_local_node, build_local_node
 from omsim.sim.clock import SimClock
 
 NodeSpec = collections.namedtuple("NodeSpec", ["node_id", "eds", "mxex"])
@@ -28,8 +28,9 @@ class NodeManager(object):
             return
         for node in self.nodes.values():
             self.network[node.id] = node
-            # 実機と同様、初期化後は自律的に PRE-OPERATIONAL へ遷移する。
-            node.nmt.state = "PRE-OPERATIONAL"
+            # 実機と同様、初期化後は自律的に boot-up を送出し PRE-OPERATIONAL へ
+            # 遷移する。起動処理自体はノード個別の責務のため od_bridge 側に置く。
+            boot_local_node(node)
         self._started = True
 
     def stop(self):
