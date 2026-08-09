@@ -233,6 +233,12 @@ class DriverModel(object):
             PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x606C, 0, 32)]),
         ]
 
+        # FW/RV 運転のパラメータ (HP-5141J 13-2 実測。NET-ID 336/337)。
+        # CANopen の OD には無い (MEXE02 専用)。
+        self.jog_distance = 1              # (JOG) 移動量 [step]
+        self.jog_velocity_rpm = 100        # (JOG) 運転速度 [r/min]
+        self._previous_inching = {"fw": False, "rv": False}
+
         # ストアードデータ運転の運転データと選択状態
         self.operation_data = OperationDataTable()
         self.net_selection_data_number = 0    # 403Dh
@@ -347,6 +353,7 @@ class DriverModel(object):
         ctx = self._context()
         self._apply_remote_inputs()
         self._handle_start_signal()
+        self._handle_fwrv_signals()
         # ダイレクトデータ運転が動いている間は CiA402 の運転モードを止める。
         # 両方が毎周期プロファイルを書くと指令を奪い合い、加減速レート次第で
         # まったく加速しなくなる (実経路のテストで露見)。
@@ -1216,6 +1223,61 @@ class DriverModel(object):
     @router.writer(0x1011, 2)
     def _write_restore_communication(self, sub, value):
         self._restore_defaults(value, communication_only=True)
+
+    # --- FW/RV 運転 (JOG / インチング / 連続運転) ---
+
+    def _jog_direction(self, forward_signal, reverse_signal):
+        """+1 / -1 / 0 を返す。両方入っていたら動かさない。"""
+        forward = self.remote_signal(forward_signal)
+        reverse = self.remote_signal(reverse_signal)
+        if forward and reverse:
+            return 0
+        if forward:
+            return +1
+        if reverse:
+            return -1
+        return 0
+
+    def _handle_fwrv_signals(self):
+        """FW/RV 系の信号を見て運転を作る。
+
+        JOG (FW-JOG/RV-JOG) と連続運転 (FW-SPD/RV-SPD) は「押している間だけ」、
+        インチング (FW-JOG-P/RV-JOG-P) は「立ち上がりで 1 回だけ移動量ぶん」。
+        実行系はダイレクトデータ運転と共有する。
+        """
+        if not self.plant.excited:
+            return False
+
+        # インチングは立ち上がり検出
+        for key, signal, sign in (("fw", "FW-JOG-P", +1), ("rv", "RV-JOG-P", -1)):
+            pressed = self.remote_signal(signal)
+            rising = pressed and not self._previous_inching[key]
+            self._previous_inching[key] = pressed
+            if rising:
+                self.direct_data.velocity = self.jog_velocity_rpm
+                self.direct_data.acceleration = self.profile_acceleration_rpm_s
+                self.direct_data.deceleration = self.profile_deceleration_rpm_s
+                self.direct_data.position = sign * int(self.jog_distance)
+                self._start_direct_motion("relative_detected")
+                return True
+
+        direction = self._jog_direction("FW-JOG", "RV-JOG")
+        if direction == 0:
+            direction = self._jog_direction("FW-SPD", "RV-SPD")
+        if direction == 0:
+            # 押している間だけの運転だったなら止める
+            if self._direct_motion is not None and self._direct_motion.get("held"):
+                self._direct_motion = None
+            return False
+
+        self._direct_motion = {
+            "kind": "velocity",
+            "held": True,
+            "velocity": direction * self.jog_velocity_rpm,
+            "acceleration": self.profile_acceleration_rpm_s,
+            "deceleration": self.profile_deceleration_rpm_s,
+        }
+        return True
 
     # --- ストアードデータ運転 ---
 
