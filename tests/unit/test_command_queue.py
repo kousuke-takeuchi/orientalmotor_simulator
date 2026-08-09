@@ -150,3 +150,42 @@ def test_default_trigger_is_immediate():
     queue.put(0x6083, 0, 900)  # trigger 省略
     queue.drain(model)         # sync_received 省略
     assert model.read_object(0x6083) == 900
+
+
+# --- 状態遷移コマンド (6040h Controlword) は潰してはいけない ---
+
+def test_controlword_transition_sequence_is_not_collapsed():
+    """CiA402 の起動シーケンス 6 -> 7 -> F は 1 制御周期に重なっても全部効く。
+
+    last-write-wins で最後の 0x000F だけを残すと、中間の遷移
+    (shutdown / switch on) が失われてノードが永久に起動しない。
+    実機のドライバは Controlword への書込みそのものを 1 回ずつ処理するため、
+    「コマンドレジスタ」は順序を保って全件適用する。
+    """
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    model.step(0.001)
+    for value in (0x0006, 0x0007, 0x000F):
+        queue.put(0x6040, 0, value)
+    assert queue.pending_count() == 3
+    queue.drain(model)
+    model.step(0.001)
+    assert model.state_machine.state == "operation-enabled"
+
+
+def test_repeated_identical_controlword_is_still_coalesced():
+    """同じ値の連投は遷移を生まないので 1 件に潰してよい (PDO の垂れ流し対策)。"""
+    queue = CommandQueue()
+    for _ in range(5):
+        queue.put(0x6040, 0, 0x000F)
+    assert queue.pending_count() == 1
+
+
+def test_non_command_objects_are_still_last_write_wins():
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    queue.put(0x60FF, 0, 100)
+    queue.put(0x60FF, 0, 200)
+    assert queue.pending_count() == 1
+    queue.drain(model)
+    assert model.read_object(0x60FF) == 200

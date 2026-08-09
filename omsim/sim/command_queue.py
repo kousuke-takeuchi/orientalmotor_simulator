@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 QueuedWrite = collections.namedtuple(
     "QueuedWrite", ["index", "sub", "value", "trigger"])
 
+# 「同じオブジェクトへの複数回書込みは最後だけが効く」が成り立たない
+# オブジェクト。値そのものではなく "遷移" を指示するコマンドレジスタで、
+# 潰すと中間状態が失われる。
+SEQUENCE_SENSITIVE_OBJECTS = frozenset([
+    (0x6040, 0),  # Controlword (CiA402 の状態遷移)
+])
+
 DEFAULT_MAXLEN = 64
 
 
@@ -30,15 +37,39 @@ class CommandQueue(object):
     def __init__(self, maxlen=DEFAULT_MAXLEN):
         self._lock = threading.Lock()
         self._maxlen = maxlen
-        # (index, sub) -> QueuedWrite。挿入順は OrderedDict のキー順で保つ
+        # キー -> QueuedWrite。挿入順は OrderedDict のキー順で保つ
         # (異なるキー間の適用順序を保存するため)。同じキーへの再書込みは
         # 一度削除してから append し直し、最新の書込みを最後尾に置く。
         self._items = collections.OrderedDict()
+        # 状態遷移コマンド用の連番。同じ (index, sub) でも別キーになるよう
+        # 付ける (順序を保って全件残すため)。
+        self._sequence = 0
+
+    def _make_key(self, index, sub, value):
+        """この書込みをどのキーで保持するかを決める。
+
+        通常のオブジェクトは (index, sub) をキーにして last-write-wins。
+        Controlword のような状態遷移コマンドは、値が変わるたびに 1 つの
+        遷移を意味するため潰してはならない (6 -> 7 -> F が 1ms 内に重なると
+        F だけが残り、中間の遷移が失われてノードが永久に起動しない)。
+        同じ値の連投は遷移を生まないので従来どおり 1 件に潰す。
+        """
+        key = (index, sub)
+        if key not in SEQUENCE_SENSITIVE_OBJECTS:
+            return key, True
+        for existing_key in reversed(self._items):
+            existing = self._items[existing_key]
+            if (existing.index, existing.sub) == key:
+                if existing.value == value:
+                    return existing_key, True  # 同値の連投は潰す
+                break
+        self._sequence += 1
+        return (index, sub, self._sequence), False
 
     def put(self, index, sub, value, trigger="immediate"):
-        key = (index, sub)
         with self._lock:
-            if key in self._items:
+            key, coalescing = self._make_key(index, sub, value)
+            if coalescing and key in self._items:
                 del self._items[key]
             elif len(self._items) >= self._maxlen:
                 oldest_key, oldest = next(iter(self._items.items()))
