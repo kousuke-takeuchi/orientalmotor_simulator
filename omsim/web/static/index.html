@@ -74,8 +74,10 @@
     <section id="pane-3d">
       <h2>3D モニタ</h2>
       <p class="note">
-        node ごとのモーターを表示し、実位置 (6064h) に合わせて軸を回します。
-        形状は STEP の実寸 (scripts/step_bbox.py で実測) に基づく近似です。
+        node ごとのモーターを表示します。形状は docs/oriental_motor/ の STEP を
+        メッシュ化した実物です (scripts/step_to_mesh.py で生成)。
+        出力軸まわりのオレンジの指標が実位置 (6064h) に合わせて回ります
+        (STEP では housing と軸が 1 つのソリッドで、軸だけを回せないため)。
         ドラッグで回転、ホイールでズーム。
       </p>
       <div id="motor3d"></div>

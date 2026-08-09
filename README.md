@@ -152,13 +152,20 @@ VM の外のブラウザから開く場合は明示的に `--web-host 0.0.0.0` �
 実位置（`6064h`）に合わせて軸が回ります。ドラッグで回転、ホイールでズーム。
 動力遮断中（HWTO）はモーターが赤くなります。
 
-形状は STEP そのものではなく、`docs/oriental_motor/*.step` から実測した外形寸法に基づく
-近似（円筒＋板）です。STEP → メッシュ変換には CAD ツールが必要で、この環境には無いためです。
-寸法は次のコマンドで再確認できます。
+形状は **`docs/oriental_motor/*.step` の本物**をメッシュ化したものです
+（`scripts/step_to_mesh.py` で生成し、`omsim/web/static/models/*.stl` に置いています）。
+STEP では housing と軸が 1 つのソリッドで軸だけを回せないため、出力軸の軸線
+（原点まわり・Z 軸。半径 47mm の円筒面から実測）の延長上に回転指標を置き、
+それが `6064h` に合わせて回ります。
+
+メッシュの再生成（gmsh は変換のときだけ必要で、実行時の依存ではありません）:
 
 ```bash
-python3 scripts/step_bbox.py docs/oriental_motor/A1806.step
+pip3 install --user gmsh
+python3 scripts/step_to_mesh.py docs/oriental_motor/A1861_F.step     omsim/web/static/models/A1861_F.stl --size 8
 ```
+
+外形寸法だけを見たいときは `python3 scripts/step_bbox.py docs/oriental_motor/A1806.step`。
 
 Three.js は `omsim/web/static/vendor/` に同梱しています（オフライン前提のため CDN を使わない）。
 版とライセンスは `omsim/web/static/vendor/README.md` を参照してください。

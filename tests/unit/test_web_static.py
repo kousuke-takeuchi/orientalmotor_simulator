@@ -165,6 +165,28 @@ def test_motor3d_does_not_reference_any_external_host():
     assert "./vendor/three.module.min.js" in js
 
 
+def test_motor3d_uses_the_real_step_derived_meshes():
+    """近似形状ではなく docs/oriental_motor/ の STEP から起こした実物を使う。"""
+    js = _read("motor3d.js")
+    assert "/static/models/A1861_F.stl" in js
+    assert "/static/models/A1806.stl" in js
+    for name in ("A1861_F.stl", "A1806.stl"):
+        path = os.path.join(STATIC_DIR, "models", name)
+        assert os.path.exists(path)
+        assert os.path.getsize(path) > 100000
+    # STL ローダも同梱していること (CDN を使わない)
+    assert os.path.exists(os.path.join(STATIC_DIR, "vendor", "STLLoader.js"))
+    loader = _read(os.path.join("vendor", "STLLoader.js"))
+    assert "from './three.module.min.js'" in loader
+
+
+def test_motor3d_reports_a_model_that_cannot_be_loaded():
+    """読めなかったときに黙って近似形状で代替しないこと。"""
+    js = _read("motor3d.js")
+    assert "console.error" in js
+    assert "3D モデルを読み込めません" in js
+
+
 def test_motor3d_top_level_vars_do_not_collide_with_window_globals():
     js = _read("motor3d.js")
     top_level_var_names = re.findall(r"(?m)^var\s+([A-Za-z_$][\w$]*)", js)

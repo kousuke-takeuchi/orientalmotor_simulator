@@ -1,78 +1,67 @@
 // node ごとのモーターを 3D 表示し、6064h (実位置) に合わせて軸を回す。
 //
-// 形状は STEP そのものではなくパラメトリックな近似。STEP -> メッシュ変換には
-// CAD ツールが必要で、この環境 (VM / Windows とも) に無いため。寸法だけは
-// scripts/step_bbox.py で実測した値を使い、目分量にしない。
+// 形状は docs/oriental_motor/ の STEP を実際にメッシュ化したもの
+// (scripts/step_to_mesh.py で生成し、omsim/web/static/models/*.stl に置く)。
+// 近似形状ではなく本物の外形を表示する。
 //
 // app.js (クラシックスクリプト) から呼べるよう window.omsimMotor3d に生やす。
 import * as THREE from "./vendor/three.module.min.js";
+import { STLLoader } from "./vendor/STLLoader.js";
 
-// scripts/step_bbox.py の実測値 [mm]。
-//   A1806.step   : 65.0 x 29.1 x 80.2
-//   A1861_F.step : 111.0 x 218.0 x 191.0
-var MOTOR_BODY_DIAMETER = 65.0;
-var MOTOR_BODY_LENGTH = 80.2;
-// A1861_F は取付ブラケット相当。実寸の外形 (111 x 218 x 191) のうち、
-// 板厚は STEP から機械的には取れないので 10mm と仮定している (ここだけ推定)。
-var BRACKET_WIDTH = 111.0;
-var BRACKET_HEIGHT = 191.0;
-var BRACKET_THICKNESS = 10.0;
-var SHAFT_DIAMETER = 12.0;
-var SHAFT_LENGTH = 40.0;
-var NODE_SPACING = 220.0;
+// 表示するモデル。STEP の実寸 (mm) をそのまま使う。
+var MODELS = [
+  { url: "/static/models/A1861_F.stl", color: 0x9aa4b2 },
+  { url: "/static/models/A1806.stl", color: 0x5d6672 }
+];
 
-var COLOR_BODY = 0x9aa4b2;
-var COLOR_BODY_CUT = 0xb26a6a;   // 動力遮断中 (トルクが出せない)
-var COLOR_BRACKET = 0x5d6672;
-var COLOR_SHAFT = 0xd8dee9;
-var COLOR_KEY = 0x2b3038;        // 回転が見えるようにする目印
+var NODE_SPACING = 320.0;
+
+var COLOR_CUT = 0xb26a6a;   // 動力遮断中 (トルクが出せない)
 
 var scene = null;
 var camera = null;
 var renderer = null;
 var motors = {};   // nodeId -> { group, shaft, body }
-var view = { yaw: 0.6, pitch: 0.35, distance: 520, targetX: 0 };
+var view = { yaw: 0.6, pitch: 0.35, distance: 700, targetX: 0 };
 
 function makeMotor() {
+  // 実物のメッシュを読み込む。読み込み中は空の Group を返し、届いた順に足す。
   var group = new THREE.Group();
-
-  var body = new THREE.Mesh(
-    new THREE.CylinderGeometry(
-      MOTOR_BODY_DIAMETER / 2, MOTOR_BODY_DIAMETER / 2, MOTOR_BODY_LENGTH, 32),
-    new THREE.MeshLambertMaterial({ color: COLOR_BODY })
+  var parts = [];
+  var loader = new STLLoader();
+  MODELS.forEach(function (entry) {
+    loader.load(entry.url, function (geometry) {
+      geometry.computeVertexNormals();
+      var material = new THREE.MeshLambertMaterial({ color: entry.color });
+      var mesh = new THREE.Mesh(geometry, material);
+      mesh.userData.baseColor = entry.color;
+      group.add(mesh);
+      parts.push(mesh);
+      render();
+    }, undefined, function (err) {
+      // 読めなかったことを黙って隠さない (近似形状で代替もしない)。
+      console.error("3D モデルを読み込めません: " + entry.url, err);
+    });
+  });
+  // STEP は housing と軸が 1 つのソリッドなので、軸だけを取り出して回すことが
+  // できない。そこで出力軸の実際の軸線 (原点まわり・Z 軸。半径 47mm の円筒面から
+  // 実測) の延長上、モデルの外側に回転指標を置いて回転量が見えるようにする。
+  var marker = new THREE.Mesh(
+    new THREE.BoxGeometry(8, 70, 8),
+    new THREE.MeshLambertMaterial({ color: 0xffcf7e })
   );
-  // 円筒の既定軸は Y。軸方向を Z に倒して「横向きのモーター」にする。
-  body.rotation.x = Math.PI / 2;
-  body.position.z = -MOTOR_BODY_LENGTH / 2;
-  group.add(body);
-
-  var bracket = new THREE.Mesh(
-    new THREE.BoxGeometry(BRACKET_WIDTH, BRACKET_HEIGHT, BRACKET_THICKNESS),
-    new THREE.MeshLambertMaterial({ color: COLOR_BRACKET })
-  );
-  bracket.position.z = -MOTOR_BODY_LENGTH - BRACKET_THICKNESS / 2;
-  group.add(bracket);
-
   var shaft = new THREE.Group();
-  var shaftMesh = new THREE.Mesh(
-    new THREE.CylinderGeometry(
-      SHAFT_DIAMETER / 2, SHAFT_DIAMETER / 2, SHAFT_LENGTH, 24),
-    new THREE.MeshLambertMaterial({ color: COLOR_SHAFT })
+  marker.position.y = 35;
+  shaft.add(marker);
+  var hub = new THREE.Mesh(
+    new THREE.CylinderGeometry(6, 6, 60, 16),
+    new THREE.MeshLambertMaterial({ color: 0xffcf7e })
   );
-  shaftMesh.rotation.x = Math.PI / 2;
-  shaftMesh.position.z = SHAFT_LENGTH / 2;
-  shaft.add(shaftMesh);
-
-  // 軸だけだと回っているか分からないので、キー溝に相当する平板を付ける。
-  var key = new THREE.Mesh(
-    new THREE.BoxGeometry(SHAFT_DIAMETER * 1.6, SHAFT_DIAMETER * 0.35, SHAFT_LENGTH * 0.9),
-    new THREE.MeshLambertMaterial({ color: COLOR_KEY })
-  );
-  key.position.set(0, SHAFT_DIAMETER / 2, SHAFT_LENGTH / 2);
-  shaft.add(key);
-
+  hub.rotation.x = Math.PI / 2;
+  shaft.add(hub);
+  shaft.position.set(0, 0, -130);
   group.add(shaft);
-  return { group: group, shaft: shaft, body: body };
+  return { group: group, shaft: shaft, parts: parts };
 }
 
 function layout() {
@@ -116,7 +105,7 @@ function render() {
     view.distance * Math.sin(view.pitch),
     view.distance * Math.cos(view.pitch) * Math.cos(view.yaw)
   );
-  camera.lookAt(view.targetX, 0, -MOTOR_BODY_LENGTH / 2);
+  camera.lookAt(view.targetX, 60, 0);
   renderer.render(scene, camera);
 }
 
@@ -172,7 +161,9 @@ export function updateMotor3d(payload) {
     motor.shaft.rotation.z = angleRad(
       snap.actual_position, snap.increments_per_revolution);
     var cut = Boolean(snap.power_cut);
-    motor.body.material.color.setHex(cut ? COLOR_BODY_CUT : COLOR_BODY);
+    motor.parts.forEach(function (mesh) {
+      mesh.material.color.setHex(cut ? COLOR_CUT : mesh.userData.baseColor);
+    });
   });
   render();
 }
