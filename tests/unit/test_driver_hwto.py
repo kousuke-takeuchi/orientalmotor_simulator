@@ -153,3 +153,22 @@ def test_snapshot_exposes_hwto_state_for_the_web():
         "hwto1_on": False, "hwto2_on": True,
         "eto_active": False, "edm_mon": False, "hwtoin_mon": True,
     }
+
+
+def test_validate_object_does_not_clear_eto_on_the_real_model():
+    """40D0h の検証 (SDO 受信時) が実モデルの ETO を解除してしまわないこと。
+
+    validate_object は writer を使い捨てコピー上で走らせる方式なので、
+    writer が触る入れ子は _SHADOW_DEEP_ATTRS に入っていなければならない。
+    hwto が漏れていると、SDO で 40D0h=1 を書いた瞬間 (キューに積む前の
+    検証段階) に実モデルの ETO が解除される。
+    """
+    model = enabled_model()
+    model.set_hwto_inputs(False, False)
+    run(model, 50)
+    model.set_hwto_inputs(True, True)
+    run(model, 10)
+    assert model.hwto.eto_active is True
+
+    model.validate_object(0x40D0, 0, 1)
+    assert model.hwto.eto_active is True  # 検証だけでは解除されない

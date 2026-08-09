@@ -159,6 +159,9 @@ class DriverModel(object):
     _SHADOW_DEEP_ATTRS = (
         "state_machine", "plant", "alarms", "passthrough_values",
         "rpdo_comm", "rpdo_mapping", "tpdo_comm", "tpdo_mapping",
+        # 40D0h (Clear ETO) の writer が hwto を書き換えるため必須。
+        # 漏らすと SDO 受信時の検証だけで実機の ETO が解除される。
+        "hwto",
     )
 
     def _shadow(self):
