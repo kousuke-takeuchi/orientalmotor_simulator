@@ -14,6 +14,13 @@ from omsim.driver.errors import (
 from omsim.driver.motor_plant import MotorPlant
 from omsim.driver.objects import ObjectRouter
 from omsim.driver.operation import OperationContext, ProfileVelocityMode
+from omsim.driver.pdo import (
+    RPDO_BASE_COB_ID,
+    RPDO_TRANSMISSION_TYPES,
+    TPDO_BASE_COB_ID,
+    PdoCommParams,
+    is_supported_tpdo_transmission_type,
+)
 from omsim.driver.profile import TrapezoidProfile
 from omsim.driver.state_machine import Cia402StateMachine, State
 from omsim.driver.units import UnitConverter
@@ -74,6 +81,20 @@ class DriverModel(object):
         # 挙動には反映しない（常に既定の「減速完了で switch-on-disabled」）。
         self.quick_stop_option_code = 2
 
+        # PDO 通信パラメータ (1400h-1403h / 1800h-1803h)。既定値は EDS 実測。
+        self.rpdo_comm = [
+            PdoCommParams(cob_id=RPDO_BASE_COB_ID[i] + node_id, valid=True,
+                          rtr_allowed=True, transmission_type=255)
+            for i in range(4)
+        ]
+        self.tpdo_comm = [
+            PdoCommParams(cob_id=TPDO_BASE_COB_ID[i] + node_id, valid=True,
+                          rtr_allowed=False,
+                          transmission_type=(255 if i < 2 else 1),
+                          inhibit_time_100us=50, event_timer_ms=0)
+            for i in range(4)
+        ]
+
         # passthrough で書かれた値。インスタンスごとに独立。
         self.passthrough_values = {}
 
@@ -91,6 +112,7 @@ class DriverModel(object):
     # (test_shadow_isolation_holds_for_every_registered_writer が検出する)。
     _SHADOW_DEEP_ATTRS = (
         "state_machine", "plant", "alarms", "passthrough_values",
+        "rpdo_comm", "tpdo_comm",
     )
 
     def _shadow(self):
@@ -502,6 +524,110 @@ class DriverModel(object):
         "何も伝わらない。配線 (reset 受信時に DriverModel を初期化し直す) "
         "は P3 で実施予定"
     )
+
+    # --- PDO 通信パラメータ (1400h-1403h / 1800h-1803h) ---
+
+    def _write_pdo_comm_cob_id(self, params_list, slot, value, allow_rtr_bit):
+        raw = int(value) & 0xFFFFFFFF
+        decoded = PdoCommParams.decode_cob_id_sub1(raw)
+        if not allow_rtr_bit and not decoded["rtr_allowed"]:
+            # RPDO の COB-ID には RTR ビットの意味が無い (常に ZERO 領域)。
+            # 立てて書かれても無視して常に許可扱いにする (実害が無いため
+            # abort まではしない)。
+            decoded["rtr_allowed"] = True
+        params_list[slot].cob_id = decoded["cob_id"]
+        params_list[slot].rtr_allowed = decoded["rtr_allowed"]
+        params_list[slot].valid = decoded["valid"]
+
+    def _write_transmission_type(self, params_list, slot, value, allowed_check):
+        value = int(value)
+        if not allowed_check(value):
+            raise ObjectAccessError(
+                0x06090030, "{:02X}h は未対応の transmission type です".format(value))
+        params_list[slot].transmission_type = value
+
+    # RPDO 通信パラメータ (1400h-1403h)
+    for _slot, _index in enumerate((0x1400, 0x1401, 0x1402, 0x1403)):
+        def _make_rpdo_comm_handlers(slot=_slot, index=_index):
+            # ループ変数はキーワード引数の既定値で捕捉する。自由変数のまま
+            # 参照すると del 後に全スロットが最後の値を見る (Python の罠)。
+            def read_highest(self, sub):
+                return 2
+
+            def read_cob_id(self, sub):
+                return self.rpdo_comm[slot].encode_cob_id_sub1()
+
+            def write_cob_id(self, sub, value):
+                self._write_pdo_comm_cob_id(
+                    self.rpdo_comm, slot, value, allow_rtr_bit=False)
+
+            def read_tt(self, sub):
+                return self.rpdo_comm[slot].transmission_type
+
+            def write_tt(self, sub, value):
+                self._write_transmission_type(
+                    self.rpdo_comm, slot, value,
+                    lambda v: v in RPDO_TRANSMISSION_TYPES)
+
+            return read_highest, read_cob_id, write_cob_id, read_tt, write_tt
+
+        _read_highest, _read_cob_id, _write_cob_id, _read_tt, _write_tt = (
+            _make_rpdo_comm_handlers())
+        router.reader(_index, 0)(_read_highest)
+        router.reader(_index, 1)(_read_cob_id)
+        router.writer(_index, 1)(_write_cob_id)
+        router.reader(_index, 2)(_read_tt)
+        router.writer(_index, 2)(_write_tt)
+    del _slot, _index
+
+    # TPDO 通信パラメータ (1800h-1803h)
+    for _slot, _index in enumerate((0x1800, 0x1801, 0x1802, 0x1803)):
+        def _make_tpdo_comm_handlers(slot=_slot, index=_index):
+            def read_highest(self, sub):
+                return 5
+
+            def read_cob_id(self, sub):
+                return self.tpdo_comm[slot].encode_cob_id_sub1()
+
+            def write_cob_id(self, sub, value):
+                self._write_pdo_comm_cob_id(
+                    self.tpdo_comm, slot, value, allow_rtr_bit=True)
+
+            def read_tt(self, sub):
+                return self.tpdo_comm[slot].transmission_type
+
+            def write_tt(self, sub, value):
+                self._write_transmission_type(
+                    self.tpdo_comm, slot, value, is_supported_tpdo_transmission_type)
+
+            def read_inhibit(self, sub):
+                return self.tpdo_comm[slot].inhibit_time_100us
+
+            def write_inhibit(self, sub, value):
+                self.tpdo_comm[slot].inhibit_time_100us = int(value) & 0xFFFF
+
+            def read_event(self, sub):
+                return self.tpdo_comm[slot].event_timer_ms
+
+            def write_event(self, sub, value):
+                self.tpdo_comm[slot].event_timer_ms = int(value) & 0xFFFF
+
+            return (read_highest, read_cob_id, write_cob_id, read_tt, write_tt,
+                    read_inhibit, write_inhibit, read_event, write_event)
+
+        (_read_highest, _read_cob_id, _write_cob_id, _read_tt, _write_tt,
+         _read_inhibit, _write_inhibit, _read_event, _write_event) = (
+            _make_tpdo_comm_handlers())
+        router.reader(_index, 0)(_read_highest)
+        router.reader(_index, 1)(_read_cob_id)
+        router.writer(_index, 1)(_write_cob_id)
+        router.reader(_index, 2)(_read_tt)
+        router.writer(_index, 2)(_write_tt)
+        router.reader(_index, 3)(_read_inhibit)
+        router.writer(_index, 3)(_write_inhibit)
+        router.reader(_index, 5)(_read_event)
+        router.writer(_index, 5)(_write_event)
+    del _slot, _index
 
     # --- .mxex に保存される純パラメータ群 ---
     # 値を保持して読み返せるが、挙動には効かない。実装フェーズは各行のとおり。
