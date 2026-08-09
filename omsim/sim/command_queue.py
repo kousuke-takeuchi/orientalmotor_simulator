@@ -20,7 +20,8 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-QueuedWrite = collections.namedtuple("QueuedWrite", ["index", "sub", "value"])
+QueuedWrite = collections.namedtuple(
+    "QueuedWrite", ["index", "sub", "value", "trigger"])
 
 DEFAULT_MAXLEN = 64
 
@@ -34,7 +35,7 @@ class CommandQueue(object):
         # 一度削除してから append し直し、最新の書込みを最後尾に置く。
         self._items = collections.OrderedDict()
 
-    def put(self, index, sub, value):
+    def put(self, index, sub, value, trigger="immediate"):
         key = (index, sub)
         with self._lock:
             if key in self._items:
@@ -47,24 +48,34 @@ class CommandQueue(object):
                     "%04Xh:%02X=%s を破棄しました",
                     self._maxlen, oldest.index, oldest.sub, oldest.value,
                 )
-            self._items[key] = QueuedWrite(index, sub, value)
+            self._items[key] = QueuedWrite(index, sub, value, trigger)
 
     def pending_count(self):
         with self._lock:
             return len(self._items)
 
-    def drain(self, model):
-        """溜まった書込みを順に適用し、発生した例外の一覧を返す。
+    def drain(self, model, sync_received=False):
+        """溜まった書込みのうち、今回適用すべきものだけを取り出して適用する。
+
+        trigger="immediate" は毎回適用する。trigger="sync" は
+        sync_received=True の回だけ適用し、そうでなければキューに残して
+        次の SYNC まで待つ。
 
         1 件が失敗しても後続を捨てない。捨てると「マスタは書けたつもり
         なのにシミュレータが受け取っていない」という追跡困難な状態になる。
         """
         with self._lock:
-            items = list(self._items.values())
-            self._items.clear()
+            ready = []
+            remaining = collections.OrderedDict()
+            for key, item in self._items.items():
+                if item.trigger == "sync" and not sync_received:
+                    remaining[key] = item
+                else:
+                    ready.append(item)
+            self._items = remaining
 
         errors = []
-        for item in items:
+        for item in ready:
             try:
                 model.write_object(item.index, item.sub, item.value)
             except Exception as err:

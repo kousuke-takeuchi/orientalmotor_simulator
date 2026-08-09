@@ -110,3 +110,43 @@ def test_maxlen_is_not_consumed_by_updates_to_the_same_key():
     queue.drain(model)
     assert model.read_object(0x6083) == 200
     assert model.read_object(0x6084) == 300
+
+
+def test_immediate_trigger_is_applied_every_drain():
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    queue.put(0x6083, 0, 500, trigger="immediate")
+    queue.drain(model, sync_received=False)
+    assert model.read_object(0x6083) == 500
+
+
+def test_sync_trigger_waits_for_sync_received():
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    queue.put(0x6083, 0, 600, trigger="sync")
+    queue.drain(model, sync_received=False)
+    assert model.read_object(0x6083) == 1000  # まだ既定値のまま
+    assert queue.pending_count() == 1
+
+    queue.drain(model, sync_received=True)
+    assert model.read_object(0x6083) == 600
+    assert queue.pending_count() == 0
+
+
+def test_sync_and_immediate_can_coexist_in_the_same_drain():
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    queue.put(0x6083, 0, 700, trigger="sync")
+    queue.put(0x6084, 0, 800, trigger="immediate")
+    queue.drain(model, sync_received=False)
+    assert model.read_object(0x6083) == 1000  # sync 待ち
+    assert model.read_object(0x6084) == 800   # immediate は即時反映
+    assert queue.pending_count() == 1
+
+
+def test_default_trigger_is_immediate():
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    queue.put(0x6083, 0, 900)  # trigger 省略
+    queue.drain(model)         # sync_received 省略
+    assert model.read_object(0x6083) == 900
