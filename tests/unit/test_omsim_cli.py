@@ -137,3 +137,15 @@ def test_wiring_rejects_an_unknown_preset():
 
     with pytest.raises(SystemExit):
         parse_args(["--wiring", "nonsense"])
+
+
+def test_replay_option_defaults_to_none():
+    assert parse_args([]).replay is None
+
+
+def test_replay_requires_a_web_port(capsys):
+    from omsim.apps.omsim_main import run_replay
+
+    args = parse_args(["--replay", "/tmp/none.jsonl"])
+    assert run_replay(args) == 2
+    assert "--web-port" in capsys.readouterr().err

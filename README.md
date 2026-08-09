@@ -333,6 +333,39 @@ model.inject_alarm(0x30)   # EMCY と error register は表から決まる
 Web には**アラームモニタ**（現在アラームと `1003h` 履歴をコード名つきで表示）と
 **I/O モニタ**（R-IN / R-OUT を既定機能名でランプ表示）があります。
 
+## シナリオのレポートと再生 (P7)
+
+### report.html
+
+```bash
+python3 -m omsim.apps.scenario tests/scenarios/two_nodes_pv.yaml     --junit junit.xml --report report.html --record-path rec.jsonl
+```
+
+各ステップの PASS/FAIL・所要時間・実測値を 1 枚の HTML にまとめます。外部を一切
+参照しないのでオフラインでも CI の成果物としても開けます。`--record-path` に
+`omsim --record` が書いた jsonl を渡すと CAN ログの末尾を添えます
+（渡さなければ「記録はありません」と明記します）。
+
+### 再生 (replay)
+
+```bash
+# 記録する
+python3 -m omsim.apps.omsim_main --node 1 --node 2 --record rec.jsonl
+
+# 記録を再生する (シミュレーションも CAN も動かさない)
+python3 -m omsim.apps.omsim_main --replay rec.jsonl --web-port 8080 --web-host 0.0.0.0
+```
+
+再生ペインのスライダで任意の時刻へ移動できます。**再生は読み取り専用**で、
+配線・安全リレーの操作はできません（HWTO パネルは自動的に隠れます）。
+
+### CI
+
+`.github/workflows/ci.yml` が Ubuntu ランナーで `vcan0` を作り、Python 3.8 で
+全テストを回します。**skip が出たら失敗させる**ので、vcan が使えないまま
+「全部通った」ように見えることはありません。シナリオの `report.html` /
+`junit.xml` / `rec.jsonl` は成果物として残ります。
+
 ## 網羅率の確認
 
 EDS（オブジェクト辞書）に定義されたオブジェクトのうち、どこまで実装済みかを確認できます。
