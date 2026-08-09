@@ -97,5 +97,5 @@ def test_web_port_is_parsed():
     assert parse_args(["--web-port", "8080"]).web_port == 8080
 
 
-def test_web_host_defaults_to_all_interfaces():
-    assert parse_args([]).web_host == "0.0.0.0"
+def test_web_host_defaults_to_localhost():
+    assert parse_args([]).web_host == "127.0.0.1"

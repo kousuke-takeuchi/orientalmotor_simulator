@@ -21,6 +21,13 @@ class SimClock(object):
             delay = target - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
+            else:
+                # 遅延している間 sleep を一切呼ばないと、シミュレーション
+                # ループが完全な busy loop になって GIL を独占し続け、
+                # CAN 受信スレッドや uvicorn スレッドが飢餓状態になる
+                # (P2 最終レビュー指摘)。time.sleep(0) は OS に一度制御を
+                # 返すだけで、追いつく速度への影響はほぼ無い。
+                time.sleep(0)
         return self.STEP_SECONDS
 
     def advance_for(self, seconds):

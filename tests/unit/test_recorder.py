@@ -34,3 +34,26 @@ def test_ring_buffer_is_bounded():
         rec.frame("tx", 0x181, bytes([1]), 0.0)
     assert len(rec.recent_frames(limit=100)) == 10
     rec.close()
+
+
+def test_frame_and_recent_frames_are_safe_across_threads():
+    import threading
+
+    from omsim.sim.recorder import Recorder
+
+    recorder = Recorder(None)
+
+    def producer(offset):
+        for i in range(200):
+            recorder.frame("bus", 0x700 + offset, bytes([i % 256]), 0.0)
+
+    threads = [threading.Thread(target=producer, args=(i,)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    # クラッシュ (例外) しないことと、直近 limit 件が取れることを確認する。
+    frames = recorder.recent_frames(limit=50)
+    assert len(frames) == 50
+    recorder.close()

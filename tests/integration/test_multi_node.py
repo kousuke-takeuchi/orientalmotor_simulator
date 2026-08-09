@@ -5,7 +5,7 @@ import time
 import canopen
 import pytest
 
-from omsim.apps.scenario import load_scenario, run_scenario
+from omsim.apps.scenario import SDO_RESPONSE_TIMEOUT, load_scenario, run_scenario
 from omsim.driver.model import MODE_PV
 from omsim.node.eds import DEFAULT_EDS_PATH
 
@@ -133,7 +133,7 @@ def test_sdo_requests_to_both_nodes_are_not_confused(running_sim, master):
     for node_id in (1, 2):
         node = canopen.RemoteNode(node_id, DEFAULT_EDS_PATH)
         master.add_node(node)
-        node.sdo.RESPONSE_TIMEOUT = 1.0
+        node.sdo.RESPONSE_TIMEOUT = SDO_RESPONSE_TIMEOUT
         remotes[node_id] = node
 
     remotes[1].sdo[0x6083].raw = 1234

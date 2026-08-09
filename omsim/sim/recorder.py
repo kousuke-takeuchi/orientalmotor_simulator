@@ -2,6 +2,7 @@
 import collections
 import json
 import logging
+import threading
 
 import can
 
@@ -14,6 +15,7 @@ class Recorder(object):
     def __init__(self, path, buffer_size=2000):
         self._handle = open(path, "w", encoding="utf-8") if path else None
         self._buffer = collections.deque(maxlen=buffer_size)
+        self._lock = threading.Lock()
 
     def frame(self, direction, can_id, data, sim_time):
         record = {
@@ -24,7 +26,8 @@ class Recorder(object):
             "data": bytes(data).hex(),
             "text": describe_frame(can_id, data),
         }
-        self._buffer.append(record)
+        with self._lock:
+            self._buffer.append(record)
         self._write(record)
 
     def state(self, snapshot):
@@ -32,7 +35,8 @@ class Recorder(object):
         self._write(record)
 
     def recent_frames(self, limit=100):
-        items = list(self._buffer)
+        with self._lock:
+            items = list(self._buffer)
         return items[-limit:]
 
     def close(self):
