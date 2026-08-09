@@ -43,10 +43,15 @@ class ProfileVelocityMode(OperationMode):
         params = ctx.params
         ctx.profile.acceleration = ctx.units.rpm_to_internal(
             params.profile_acceleration_rpm_s)
+        # 減速度は「今この瞬間に使うべき値」をモデルに聞く。quick-stop-active
+        # では 605Ah の option code に従って 6085h に切り替わる。
         ctx.profile.deceleration = ctx.units.rpm_to_internal(
-            params.profile_deceleration_rpm_s)
+            params.effective_deceleration_rpm_s)
 
-        if ctx.plant.excited:
+        # 速度指令に追従するのは operation-enabled のときだけ。
+        # quick-stop-active では励磁したまま 0 へ減速する (励磁の有無ではなく
+        # 状態で判断しないと、クイックストップ中も指令を追い続けてしまう)。
+        if ctx.state_machine.is_operation_enabled:
             ctx.profile.set_target(ctx.units.rpm_to_internal(params.target_velocity_rpm))
         else:
             ctx.profile.set_target(0.0)

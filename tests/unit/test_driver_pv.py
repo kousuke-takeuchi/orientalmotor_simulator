@@ -290,9 +290,9 @@ def test_quick_stop_ramps_down_and_exits_to_switch_on_disabled():
     assert abs(model.read_object(0x606C)) <= 1
 
 
-def test_quick_stop_option_code_is_stubbed():
+def test_quick_stop_option_code_is_implemented_since_p4():
     keys = set((index, sub) for index, sub, _reason in DriverModel.router.stubs())
-    assert (0x605A, 0) in keys
+    assert (0x605A, 0) not in keys
 
 
 def test_torque_limit_objects_are_stubbed():

@@ -37,6 +37,15 @@ from omsim.driver.pdo import (
 )
 from omsim.driver.profile import TrapezoidProfile
 from omsim.driver.state_machine import Cia402StateMachine, State
+from omsim.driver.stopping import (
+    IMMEDIATE,
+    QUICK_STOP_RAMP,
+    resolve_disable_operation,
+    resolve_fault_reaction,
+    resolve_halt,
+    resolve_quick_stop,
+    resolve_shutdown,
+)
 from omsim.driver.units import UnitConverter
 
 MODE_PV = ProfileVelocityMode.MODE_CODE
@@ -56,6 +65,20 @@ def _clamp_int32(value):
 
 class DriverModel(object):
     """1 台のドライバ。状態は全てインスタンス変数に持つ。"""
+
+    _SHUTDOWN_OPTION_STUB_REASON = (
+        "P4: 605Bh は値の保持のみ。operation-enabled -> ready-to-switch-on の"
+        "遷移は常に即時停止 (= 既定値 0 の挙動) で、1 (slow down ramp) にしても"
+        "挙動は変わらない"
+    )
+    _DISABLE_OPERATION_OPTION_STUB_REASON = (
+        "P4: 605Ch は値の保持のみ。operation-enabled -> switched-on の遷移は"
+        "常に即時停止で、既定値 1 (slow down ramp) の挙動になっていない"
+    )
+    _FAULT_REACTION_OPTION_STUB_REASON = (
+        "P4: 605Eh は値の保持のみ。アラーム検出時の停止は常に即時停止で、"
+        "既定値 2 (6085h のランプで減速) の挙動になっていない"
+    )
 
     router = ObjectRouter()
 
@@ -91,9 +114,14 @@ class DriverModel(object):
         self.profile_velocity_rpm = 1
         self.consumer_heartbeat_config = 0
         self.producer_heartbeat_config = 0
-        # 605Ah Quick stop option code: 未実装 (P5)。値は保持するのみで、
-        # 挙動には反映しない（常に既定の「減速完了で switch-on-disabled」）。
+        # 停止動作の option code (HP-5143E 605Ah-605Eh 実測の既定値)。
         self.quick_stop_option_code = 2
+        self.shutdown_option_code = 0
+        self.disable_operation_option_code = 1
+        self.halt_option_code = 1
+        self.fault_reaction_option_code = 2
+        # 6085h Quick stop deceleration。既定は通常の減速度と同じにしておく。
+        self.quick_stop_deceleration_rpm_s = 1000.0
 
         # PDO 通信パラメータ (1400h-1403h / 1800h-1803h)。既定値は EDS 実測。
         self.rpdo_comm = [
@@ -232,17 +260,100 @@ class DriverModel(object):
 
         # HP-5143E 6.2 (p35) Transition 12: quick-stop-active はクイック
         # ストップの減速完了 (指令・実速度ともに 0 付近) で switch-on-disabled
-        # へ自動的に抜ける。605Ah Quick stop option code は未実装 (P5) の
-        # ため、常にこの既定動作のみを行う。
+        # へ抜ける。抜けるかどうかと減速のしかたは 605Ah で決まる。
         if self.state_machine.state == State.QUICK_STOP_ACTIVE:
+            action = resolve_quick_stop(self.quick_stop_option_code)
+            if action.kind == IMMEDIATE:
+                self.profile.reset(0.0)
+                self.plant.velocity = 0.0
             stopped = (
                 self.profile.command == 0.0
                 and abs(self.actual_velocity_rpm) <= self.velocity_threshold_rpm
             )
-            if stopped:
+            if stopped and not action.stay_in_state:
                 self.state_machine.stop_completed()
 
         self._check_heartbeat_consumer()
+
+    @property
+    def effective_deceleration_rpm_s(self):
+        """今この瞬間に使う減速度。
+
+        通常は 6084h。quick-stop-active の間だけ 605Ah の option code に
+        従い、quick stop ramp なら 6085h を使う。運転モード側はこの値を
+        参照する (モードごとに同じ分岐を書かないため)。
+        """
+        if self.state_machine.state != State.QUICK_STOP_ACTIVE:
+            return self.profile_deceleration_rpm_s
+        action = resolve_quick_stop(self.quick_stop_option_code)
+        if action.kind == QUICK_STOP_RAMP:
+            return self.quick_stop_deceleration_rpm_s
+        return self.profile_deceleration_rpm_s
+
+    # --- 停止動作の option code (605Ah-605Eh) と 6085h ---
+
+    @router.reader(0x605A)
+    def _read_quick_stop_option_code(self, sub):
+        return self.quick_stop_option_code
+
+    @router.writer(0x605A)
+    def _write_quick_stop_option_code(self, sub, value):
+        code = int(value)
+        if code in (-3, -2):
+            # 4735h Custom stopping rate / 4736h Custom stopping time は
+            # 値を保持しているだけで単位が未確認 (P5 でアドレスコード表から
+            # 確定させる)。挙動を推測で作らず、明示的に拒否する。
+            raise ObjectAccessError(
+                ABORT_VALUE_RANGE,
+                "605Ah の {} (4735h/4736h によるカスタム停止) は未対応です".format(code))
+        resolve_quick_stop(code)   # 範囲外はここで abort
+        self.quick_stop_option_code = code
+
+    @router.reader(0x605B)
+    def _read_shutdown_option_code(self, sub):
+        return self.shutdown_option_code
+
+    @router.writer(0x605B, stub=_SHUTDOWN_OPTION_STUB_REASON)
+    def _write_shutdown_option_code(self, sub, value):
+        resolve_shutdown(value)
+        self.shutdown_option_code = int(value)
+
+    @router.reader(0x605C)
+    def _read_disable_operation_option_code(self, sub):
+        return self.disable_operation_option_code
+
+    @router.writer(0x605C, stub=_DISABLE_OPERATION_OPTION_STUB_REASON)
+    def _write_disable_operation_option_code(self, sub, value):
+        resolve_disable_operation(value)
+        self.disable_operation_option_code = int(value)
+
+    @router.reader(0x605D)
+    def _read_halt_option_code(self, sub):
+        return self.halt_option_code
+
+    @router.writer(0x605D)
+    def _write_halt_option_code(self, sub, value):
+        resolve_halt(value)   # 0 は仕様上 Reserved なので abort
+        self.halt_option_code = int(value)
+
+    @router.reader(0x605E)
+    def _read_fault_reaction_option_code(self, sub):
+        return self.fault_reaction_option_code
+
+    @router.writer(0x605E, stub=_FAULT_REACTION_OPTION_STUB_REASON)
+    def _write_fault_reaction_option_code(self, sub, value):
+        resolve_fault_reaction(value)
+        self.fault_reaction_option_code = int(value)
+
+    @router.reader(0x6085)
+    def _read_quick_stop_deceleration(self, sub):
+        return int(self.quick_stop_deceleration_rpm_s)
+
+    @router.writer(0x6085)
+    def _write_quick_stop_deceleration(self, sub, value):
+        if int(value) <= 0:
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6085h は 1 以上")
+        self.quick_stop_deceleration_rpm_s = float(value)
 
     # --- HWTO (動力遮断機能) ---
 
@@ -320,7 +431,13 @@ class DriverModel(object):
         を観測するテストのため）。step() と _write_controlword() の両方
         から呼ばれる共通処理。
         """
-        excited = self.state_machine.is_operation_enabled
+        # quick-stop-active の間もドライバは励磁したままクイックストップの
+        # 減速を実行する (HP-5143E 6.2 の遷移 11: 「The Quick Stop function is
+        # executed」)。ここを励磁 OFF にすると、605Ah で指定した減速ランプが
+        # 効かず惰走になってしまう。
+        excited = (
+            self.state_machine.is_operation_enabled
+            or self.state_machine.state == State.QUICK_STOP_ACTIVE)
         self.plant.excited = excited
         return excited
 
@@ -661,20 +778,6 @@ class DriverModel(object):
         if int(value) <= 0:
             raise ObjectAccessError(ABORT_VALUE_RANGE, "6084h は 1 以上")
         self.profile_deceleration_rpm_s = float(value)
-
-    _QUICK_STOP_OPTION_STUB_REASON = (
-        "P5: Quick stop option code 未実装。605Ah の値によらず、常に通常の"
-        "減速度 (6084h) でクイックストップし、停止完了で switch-on-disabled "
-        "へ抜ける既定動作のみを行う（6085h Quick stop deceleration も未実装）"
-    )
-
-    @router.reader(0x605A, stub=_QUICK_STOP_OPTION_STUB_REASON)
-    def _read_quick_stop_option_code(self, sub):
-        return self.quick_stop_option_code
-
-    @router.writer(0x605A, stub=_QUICK_STOP_OPTION_STUB_REASON)
-    def _write_quick_stop_option_code(self, sub, value):
-        self.quick_stop_option_code = int(value)
 
     @router.reader(0x608F, 1)
     def _read_encoder_increments(self, sub):
