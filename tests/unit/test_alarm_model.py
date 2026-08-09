@@ -28,19 +28,19 @@ def test_raising_queues_an_emcy():
 
 def test_raising_appends_packed_cia301_value_to_history():
     model = AlarmModel()
-    model.raise_alarm(alarm_code=0x30, emcy_code=0x2310)
-    # 下位16bit = EMCY code (0x2310)、上位16bit = メーカ固有 (0x30)
-    assert model.history[0] == (0x30 << 16) | 0x2310
+    model.raise_alarm(alarm_code=0x30, emcy_code=0xFF30)
+    # 下位16bit = EMCY code (0xFF30)、上位16bit = メーカ固有 (0x30)
+    assert model.history[0] == (0x30 << 16) | 0xFF30
 
 
 def test_raising_appends_to_history_newest_first():
     model = AlarmModel()
-    model.raise_alarm(0x30, 0x2310)
+    model.raise_alarm(0x30, 0xFF30)
     model.set_cause_cleared(True)
     model.reset()
-    model.raise_alarm(0x31, 0x2311)
-    assert model.history[0] == (0x31 << 16) | 0x2311
-    assert model.history[1] == (0x30 << 16) | 0x2310
+    model.raise_alarm(0x31, 0xFF31)
+    assert model.history[0] == (0x31 << 16) | 0xFF31
+    assert model.history[1] == (0x30 << 16) | 0xFF30
 
 
 def test_manufacturer_specific_code_with_zero_is_packed_as_zero_upper_bits():
@@ -54,7 +54,7 @@ def test_manufacturer_specific_code_with_zero_is_packed_as_zero_upper_bits():
 def test_history_is_bounded():
     model = AlarmModel(history_size=3)
     for code in range(0x30, 0x38):
-        model.raise_alarm(code, 0x2310)
+        model.raise_alarm(code, 0xFF00 | code)
         model.set_cause_cleared(True)
         model.reset()
     assert len(model.history) == 3
@@ -94,16 +94,16 @@ def test_reset_on_clean_model_is_a_no_op():
 
 def test_second_alarm_while_active_is_ignored():
     model = AlarmModel()
-    model.raise_alarm(0x30, 0x2310)
-    model.raise_alarm(0x31, 0x2311)
+    model.raise_alarm(0x30, 0xFF30)
+    model.raise_alarm(0x31, 0xFF31)
     # active_alarm はメーカ固有コードのまま (Web 表示用)
     assert model.active_alarm == 0x30
-    assert model.history == [(0x30 << 16) | 0x2310]
+    assert model.history == [(0x30 << 16) | 0xFF30]
 
 
 def test_clear_history_empties_the_list_but_keeps_active_alarm():
     model = AlarmModel()
-    model.raise_alarm(0x30, 0x2310)
+    model.raise_alarm(0x30, 0xFF30)
     model.clear_history()
     assert model.history == []
     assert model.active_alarm == 0x30

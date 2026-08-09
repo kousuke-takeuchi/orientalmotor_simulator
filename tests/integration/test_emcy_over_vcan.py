@@ -23,7 +23,7 @@ def test_alarm_injection_sends_emcy_frame_observed_from_a_separate_network(
     attach_recorder(master, recorder, stepped_sim.clock)
 
     one = stepped_sim.models[1]
-    one.inject_alarm(0x30, 0x2310, error_register=0x21)
+    one.inject_alarm(0x30)
     stepped_sim.run_for(0.5)
     time.sleep(0.3)
 
@@ -34,8 +34,8 @@ def test_alarm_injection_sends_emcy_frame_observed_from_a_separate_network(
     assert len(data) == 8
     emcy_code = data[0] | (data[1] << 8)
     error_register = data[2]
-    assert emcy_code == 0x2310
-    assert error_register == 0x21
+    assert emcy_code == 0xFF30   # HP-5143E 4.5 実測
+    assert error_register == 0x81   # メーカ固有アラームは 81h (HP-5143E 4.5)
 
 
 def test_alarm_reset_sends_error_reset_emcy_frame(stepped_sim, master):
@@ -43,7 +43,7 @@ def test_alarm_reset_sends_error_reset_emcy_frame(stepped_sim, master):
     attach_recorder(master, recorder, stepped_sim.clock)
 
     one = stepped_sim.models[1]
-    one.inject_alarm(0x30, 0x2310, error_register=0x21)
+    one.inject_alarm(0x30)
     stepped_sim.run_for(0.1)
     one.clear_alarm_cause()
     one.write_object(0x40C0, 0, 1)

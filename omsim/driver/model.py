@@ -4,6 +4,12 @@
 """
 import copy
 
+from omsim.driver.alarm_codes import (
+    ALARM_CODES,
+    ERROR_REGISTER_MANUFACTURER,
+    emcy_for,
+    error_register_for,
+)
 from omsim.driver.alarm_model import (
     ALARM_HWTO_CIRCUIT,
     ALARM_HWTO_DETECTED,
@@ -16,6 +22,7 @@ from omsim.driver.alarm_model import (
 from omsim.driver.hwto import HwtoModel  # noqa: I100 (driver 層内の依存)
 from omsim.driver.direct_data import DirectDataState
 from omsim.driver.errors import (
+    ABORT_CANNOT_STORE,
     ABORT_DEVICE_STATE,
     ABORT_NO_DATA,
     ABORT_VALUE_RANGE,
@@ -31,6 +38,12 @@ from omsim.driver.operation import (
     ProfilePositionMode,
     ProfileTorqueMode,
     ProfileVelocityMode,
+)
+from omsim.driver.persistence import (
+    LOAD_SIGNATURE,
+    SAVE_SIGNATURE,
+    STORAGE_CAPABILITY,
+    is_communication_object,
 )
 from omsim.driver.pdo import (
     RPDO_BASE_COB_ID,
@@ -214,6 +227,15 @@ class DriverModel(object):
             PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x606C, 0, 32)]),
         ]
 
+        # 稼働時間・走行距離のモニタ (40A1h/40A9h/407Eh/407Fh/407Ah)
+        self.total_uptime_seconds = 0.0
+        self.continuous_uptime_seconds = 0.0
+        self.odometer_revolutions = 0.0
+        self.tripmeter_revolutions = [0.0, 0.0]
+
+        # 1010h で保存したパラメータ (実機の不揮発メモリ相当)
+        self._saved_parameters = {}
+
         # passthrough で書かれた値。インスタンスごとに独立。
         self.passthrough_values = {}
 
@@ -239,6 +261,8 @@ class DriverModel(object):
         "touch_probe_values", "touch_probe_counters",
         # 4033h の writer が起動待ちトリガと直近値を書き換える。
         "direct_data",
+        # 1010h:02 の writer が保存領域を in-place 更新する。
+        "_saved_parameters",
     )
 
     def _shadow(self):
@@ -329,6 +353,7 @@ class DriverModel(object):
             if stopped and not action.stay_in_state:
                 self.state_machine.stop_completed()
 
+        self._accumulate_monitors(dt)
         self._check_heartbeat_consumer()
         self._apply_travel_limits()
 
@@ -540,12 +565,40 @@ class DriverModel(object):
                 "hwtoin_mon": self.hwto.hwtoin_mon,
             },
             "alarm": self.alarms.active_alarm,
+            "alarm_name": (
+                ALARM_CODES[self.alarms.active_alarm][0]
+                if self.alarms.active_alarm in ALARM_CODES else None),
             "alarm_history": self.alarms.history,
+            # 1003h のパック値 (下位=EMCY / 上位=メーカ固有) を Web が
+            # 分解しなくて済むよう、名前つきで展開しておく。
+            "alarm_history_decoded": [
+                {
+                    "emcy": entry & 0xFFFF,
+                    "code": (entry >> 16) & 0xFFFF,
+                    "name": ALARM_CODES.get((entry >> 16) & 0xFFFF, ("", ))[0],
+                }
+                for entry in self.alarms.history
+            ],
+            "remote_inputs": self.read_object(0x403E),
+            "remote_outputs": self.read_object(0x403F),
         }
 
     # --- テストと Web からアラームを注入する口 ---
 
-    def inject_alarm(self, alarm_code, emcy_code, error_register=0x21):
+    def inject_alarm(self, alarm_code, emcy_code=None, error_register=None):
+        """アラームを注入する。EMCY コードと error register は表から決まる。
+
+        明示的に渡された場合はそちらを優先する (通信系アラームなど、表に
+        無い組み合わせを流し込むテスト用)。
+        """
+        if emcy_code is None:
+            emcy_code = emcy_for(alarm_code)
+        if error_register is None:
+            # 表に無いコード (テストが作る架空のアラーム) はメーカ固有扱い。
+            error_register = (
+                error_register_for(alarm_code)
+                if int(alarm_code) in ALARM_CODES
+                else ERROR_REGISTER_MANUFACTURER)
         self.alarms.raise_alarm(alarm_code, emcy_code, error_register)
 
     def clear_alarm_cause(self):
@@ -883,6 +936,253 @@ class DriverModel(object):
             self.plant.preset_position(window[1])
         elif position < window[0]:
             self.plant.preset_position(window[0])
+
+    # --- モニタ (404Bh-4050h / 4073h / 4075h / 406Bh-4078h / 407Ah-40A9h) ---
+
+    def _accumulate_monitors(self, dt):
+        self.total_uptime_seconds += dt
+        self.continuous_uptime_seconds += dt
+        revolutions = (
+            abs(self.plant.velocity) * dt / self.units.increments_per_shaft_rev)
+        self.odometer_revolutions += revolutions
+        self.tripmeter_revolutions[0] += revolutions
+        self.tripmeter_revolutions[1] += revolutions
+
+    @router.reader(0x404B)
+    def _read_user_target_position(self, sub):
+        return _clamp_int32(self.target_position)
+
+    @router.reader(0x404C)
+    def _read_user_demand_position(self, sub):
+        # 指令位置。位置ループの指令値を別に持っていないので実位置と同じ
+        # (pv では指令位置という概念が無い。pp/hm でも台形位置決めの目標は
+        # 内部状態なので、外向きには実位置を返す)。
+        return _clamp_int32(self.plant.position)
+
+    @router.reader(0x404D)
+    def _read_user_actual_position(self, sub):
+        return _clamp_int32(self.plant.position)
+
+    @router.reader(0x404E)
+    def _read_user_target_velocity(self, sub):
+        return int(round(self.target_velocity_rpm))
+
+    @router.reader(0x404F)
+    def _read_user_demand_velocity(self, sub):
+        return int(round(self.command_velocity_rpm))
+
+    @router.reader(0x4050)
+    def _read_user_actual_velocity(self, sub):
+        return int(round(self.actual_velocity_rpm))
+
+    @router.reader(0x4073)
+    def _read_position_deviation(self, sub):
+        return 0
+
+    @router.reader(0x4075)
+    def _read_speed_deviation(self, sub):
+        return int(round(self.command_velocity_rpm - self.actual_velocity_rpm))
+
+    @router.reader(0x406B)
+    def _read_torque_monitor(self, sub):
+        return _clamp_int32(round(self.plant.torque_permille))
+
+    @router.reader(0x406C)
+    def _read_load_factor(self, sub):
+        return _clamp_int32(round(abs(self.plant.torque_permille)))
+
+    @router.reader(0x4078)
+    def _read_overload_factor(self, sub):
+        if not self.max_torque_permille:
+            return 0
+        ratio = abs(self.plant.torque_permille) / float(self.max_torque_permille)
+        return int(round(ratio * 100))
+
+    @router.reader(0x40A1)
+    def _read_total_uptime(self, sub):
+        return int(self.total_uptime_seconds)
+
+    @router.reader(0x40A9)
+    def _read_continuous_uptime(self, sub):
+        return int(self.continuous_uptime_seconds)
+
+    @router.reader(0x407E)
+    def _read_odometer(self, sub):
+        return int(self.odometer_revolutions)
+
+    @router.reader(0x407F)
+    def _read_tripmeter0(self, sub):
+        return int(self.tripmeter_revolutions[0])
+
+    @router.reader(0x407A)
+    def _read_tripmeter1(self, sub):
+        return int(self.tripmeter_revolutions[1])
+
+    _UNMODELLED_MONITOR_STUB = (
+        "P7: 物理量のモデルが無い (電圧/温度/電力量)。読み出せるが常に 0 を返すだけ"
+    )
+
+    @router.reader(0x407C, stub=_UNMODELLED_MONITOR_STUB)
+    def _read_driver_temperature(self, sub):
+        return 0
+
+    @router.reader(0x407D, stub=_UNMODELLED_MONITOR_STUB)
+    def _read_motor_temperature(self, sub):
+        return 0
+
+    @router.reader(0x40A3, stub=_UNMODELLED_MONITOR_STUB)
+    def _read_inverter_voltage(self, sub):
+        return 0
+
+    @router.reader(0x40A4, stub=_UNMODELLED_MONITOR_STUB)
+    def _read_main_power_voltage(self, sub):
+        return 0
+
+    @router.reader(0x409C, stub=_UNMODELLED_MONITOR_STUB)
+    def _read_power_consumption(self, sub):
+        return 0
+
+    # --- メンテナンスコマンド ---
+
+    def _is_execute(self, value):
+        """実行トリガ。1 以上で実行、0 は何もしない (40C0h と同じ形)。"""
+        return int(value) != 0
+
+    @router.reader(0x40C2)
+    def _read_clear_alarm_history(self, sub):
+        return 0
+
+    @router.writer(0x40C2)
+    def _write_clear_alarm_history(self, sub, value):
+        if self._is_execute(value):
+            self.alarms.clear_history()
+
+    @router.reader(0x40C5)
+    def _read_p_preset(self, sub):
+        return 0
+
+    @router.writer(0x40C5)
+    def _write_p_preset(self, sub, value):
+        # P-PRESET: 現在位置を原点 (607Ch のオフセット) にする
+        if self._is_execute(value):
+            self.plant.preset_position(int(self.home_offset))
+
+    @router.reader(0x40D6)
+    def _read_clear_user_energy(self, sub):
+        return 0
+
+    @router.writer(0x40D6, stub=_UNMODELLED_MONITOR_STUB)
+    def _write_clear_user_energy(self, sub, value):
+        return
+
+    @router.reader(0x40D7)
+    def _read_clear_tripmeter0(self, sub):
+        return 0
+
+    @router.writer(0x40D7)
+    def _write_clear_tripmeter0(self, sub, value):
+        if self._is_execute(value):
+            self.tripmeter_revolutions[0] = 0.0
+
+    @router.reader(0x40D8)
+    def _read_clear_tripmeter1(self, sub):
+        return 0
+
+    @router.writer(0x40D8)
+    def _write_clear_tripmeter1(self, sub, value):
+        if self._is_execute(value):
+            self.tripmeter_revolutions[1] = 0.0
+
+    # --- パラメータの保存 / 既定値復帰 (1010h / 1011h) ---
+
+    def _snapshot_parameters(self, communication_only=False):
+        """読み書きできるオブジェクトの現在値を集める。"""
+        values = {}
+        for index, sub in sorted(self.router.implemented_keys()):
+            if communication_only and not is_communication_object(index):
+                continue
+            if not self.router.has_writer(index, sub):
+                continue
+            try:
+                values[(index, sub)] = self.read_object(index, sub)
+            except ObjectAccessError:
+                continue
+        return values
+
+    def _apply_parameters(self, values):
+        """集めた値を書き戻す。書けなかったものは無視する (読み専用など)。"""
+        for (index, sub), value in sorted(values.items()):
+            if value is None:
+                continue
+            try:
+                self.write_object(index, sub, value)
+            except ObjectAccessError:
+                continue
+
+    def restore_saved_parameters(self):
+        """1010h で保存した値を書き戻す (電源再投入相当)。"""
+        self._apply_parameters(self._saved_parameters)
+
+    @router.reader(0x1010, 0)
+    def _read_store_count(self, sub):
+        return 2
+
+    @router.reader(0x1010, 1)
+    def _read_store_all(self, sub):
+        return STORAGE_CAPABILITY
+
+    @router.reader(0x1010, 2)
+    def _read_store_communication(self, sub):
+        return STORAGE_CAPABILITY
+
+    def _store(self, value, communication_only):
+        if int(value) & 0xFFFFFFFF != SAVE_SIGNATURE:
+            raise ObjectAccessError(
+                ABORT_CANNOT_STORE,
+                "1010h には署名 \"save\" (65766173h) を書いてください")
+        snapshot = self._snapshot_parameters(communication_only)
+        if communication_only:
+            self._saved_parameters.update(snapshot)
+        else:
+            self._saved_parameters = snapshot
+
+    @router.writer(0x1010, 1)
+    def _write_store_all(self, sub, value):
+        self._store(value, communication_only=False)
+
+    @router.writer(0x1010, 2)
+    def _write_store_communication(self, sub, value):
+        self._store(value, communication_only=True)
+
+    @router.reader(0x1011, 0)
+    def _read_restore_count(self, sub):
+        return 2
+
+    @router.reader(0x1011, 1)
+    def _read_restore_all(self, sub):
+        return STORAGE_CAPABILITY
+
+    @router.reader(0x1011, 2)
+    def _read_restore_communication(self, sub):
+        return STORAGE_CAPABILITY
+
+    def _restore_defaults(self, value, communication_only):
+        if int(value) & 0xFFFFFFFF != LOAD_SIGNATURE:
+            raise ObjectAccessError(
+                ABORT_CANNOT_STORE,
+                "1011h には署名 \"load\" (64616F6Ch) を書いてください")
+        # 既定値の正は「生まれたての DriverModel」。個別に既定値表を持つと
+        # 実装と二重管理になってずれる。
+        fresh = DriverModel(node_id=self.node_id)
+        self._apply_parameters(fresh._snapshot_parameters(communication_only))
+
+    @router.writer(0x1011, 1)
+    def _write_restore_all(self, sub, value):
+        self._restore_defaults(value, communication_only=False)
+
+    @router.writer(0x1011, 2)
+    def _write_restore_communication(self, sub, value):
+        self._restore_defaults(value, communication_only=True)
 
     # --- ダイレクトデータ運転 (402Ch-4034h) ---
 

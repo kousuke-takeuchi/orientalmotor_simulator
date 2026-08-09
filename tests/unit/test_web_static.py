@@ -183,3 +183,18 @@ def test_app_js_knows_the_mode_specific_statusword_bits():
         assert name in js
     # モード別の表を通さずに固定表を描いていないこと
     assert "statuswordBits(snap.mode)" in js
+
+
+def test_index_has_the_alarm_and_io_panes():
+    html = _read("index.html")
+    assert 'id="pane-alarm"' in html
+    assert 'id="pane-io"' in html
+
+
+def test_app_js_knows_the_remote_io_default_functions():
+    js = _read("app.js")
+    for name in ("S-ON", "QSTOP", "ALM-RST", "D-SEL7",
+                 "SON-MON", "ALM-A", "MOVE", "TLC"):
+        assert name in js
+    assert "renderAlarms" in js
+    assert "renderIo" in js
