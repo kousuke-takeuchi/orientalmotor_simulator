@@ -19,6 +19,89 @@ var STATUSWORD_BITS = [
 
 var state = { paused: false, filter: "", nodes: {} };
 
+var HISTORY_POINTS = 300;  // 100ms 間隔 x 300 = 30 秒ぶん
+
+var SERIES = [
+  { key: "actual_velocity_rpm", label: "速度 [r/min]", color: "#7ee2a8" },
+  { key: "actual_position", label: "位置 [inc]", color: "#8ab4ff" },
+  { key: "torque_permille", label: "トルク [‰]", color: "#ffcf7e" }
+];
+
+var history = {};  // nodeId -> { key -> [値] }
+
+function pushHistory(nodes) {
+  Object.keys(nodes).forEach(function (nodeId) {
+    if (!history[nodeId]) {
+      history[nodeId] = {};
+      SERIES.forEach(function (series) { history[nodeId][series.key] = []; });
+    }
+    SERIES.forEach(function (series) {
+      var buffer = history[nodeId][series.key];
+      buffer.push(Number(nodes[nodeId][series.key]) || 0);
+      if (buffer.length > HISTORY_POINTS) buffer.shift();
+    });
+  });
+}
+
+function drawChart(canvas, values, color) {
+  var ctx = canvas.getContext("2d");
+  var width = canvas.width = canvas.clientWidth;
+  var height = canvas.height = canvas.clientHeight;
+  ctx.clearRect(0, 0, width, height);
+
+  if (!values.length) return;
+
+  var min = Math.min.apply(null, values);
+  var max = Math.max.apply(null, values);
+  if (min === max) { min -= 1; max += 1; }
+  var span = max - min;
+
+  // 0 の基準線
+  if (min < 0 && max > 0) {
+    var zeroY = height - ((0 - min) / span) * height;
+    ctx.strokeStyle = "#2b313b";
+    ctx.beginPath();
+    ctx.moveTo(0, zeroY);
+    ctx.lineTo(width, zeroY);
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  values.forEach(function (value, index) {
+    var x = (index / (HISTORY_POINTS - 1)) * width;
+    var y = height - ((value - min) / span) * height;
+    if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  ctx.fillStyle = "#6b7480";
+  ctx.font = "10px sans-serif";
+  ctx.fillText(max.toFixed(1), 4, 10);
+  ctx.fillText(min.toFixed(1), 4, height - 3);
+}
+
+function renderCharts(nodes) {
+  var container = document.getElementById("charts");
+  Object.keys(nodes).sort().forEach(function (nodeId) {
+    SERIES.forEach(function (series) {
+      var id = "chart-" + nodeId + "-" + series.key;
+      var wrapper = document.getElementById(id);
+      if (!wrapper) {
+        wrapper = el("div", "chart");
+        wrapper.id = id;
+        wrapper.appendChild(el("div", "chart-label",
+          "node " + nodeId + " / " + series.label));
+        wrapper.appendChild(document.createElement("canvas"));
+        container.appendChild(wrapper);
+      }
+      drawChart(wrapper.querySelector("canvas"),
+        history[nodeId] ? history[nodeId][series.key] : [], series.color);
+    });
+  });
+}
+
 function el(tag, className, text) {
   var node = document.createElement(tag);
   if (className) node.className = className;
@@ -83,6 +166,8 @@ function onMessage(payload) {
     "t = " + fixed(payload.sim_time, 3) + " s";
   state.nodes = payload.nodes;
   renderStatus(payload.nodes);
+  pushHistory(payload.nodes);
+  renderCharts(payload.nodes);
 }
 
 function connect() {

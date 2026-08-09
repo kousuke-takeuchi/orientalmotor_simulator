@@ -62,3 +62,17 @@ def test_app_js_renders_the_monitor_values():
         "alarm",
     ):
         assert key in js
+
+
+def test_app_js_has_a_waveform_buffer_and_canvas_drawing():
+    js = _read("app.js")
+    assert "HISTORY_POINTS" in js
+    assert "getContext" in js
+    assert "drawChart" in js
+
+
+def test_app_js_charts_velocity_position_and_torque():
+    js = _read("app.js")
+    assert "SERIES" in js
+    for key in ("actual_velocity_rpm", "actual_position", "torque_permille"):
+        assert key in js
