@@ -13,6 +13,15 @@
       <span id="simtime" class="badge">t = 0.000 s</span>
     </header>
 
+    <section id="pane-replay" hidden>
+      <h2>再生</h2>
+      <div class="toolbar">
+        <button id="replay-play">再生</button>
+        <input id="replay-seek" type="range" min="0" max="1000" value="0" />
+        <span id="replay-position" class="badge">0.000 / 0.000 s</span>
+      </div>
+    </section>
+
     <section id="pane-status">
       <h2>ステータスモニタ</h2>
       <div id="nodes"></div>

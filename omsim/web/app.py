@@ -49,7 +49,27 @@ def create_app(hub):
 
     @app.get("/api/wiring")
     def get_wiring():
-        return hub.wiring()
+        try:
+            return hub.wiring()
+        except WiringError as err:
+            # 再生モードは配線を持たない。500 ではなく「今は無い」と返す。
+            raise HTTPException(status_code=409, detail=str(err))
+
+    @app.get("/api/replay")
+    def get_replay():
+        if not hasattr(hub, "seek"):
+            raise HTTPException(status_code=404, detail="再生モードではありません")
+        return hub.state()
+
+    @app.post("/api/replay")
+    def post_replay(body: dict):
+        if not hasattr(hub, "seek"):
+            raise HTTPException(status_code=404, detail="再生モードではありません")
+        if "position" in body:
+            hub.seek(body["position"])
+        if "playing" in body:
+            hub.set_playing(body["playing"])
+        return hub.state()
 
     @app.post("/api/wiring")
     def post_wiring(body: dict):
@@ -63,7 +83,10 @@ def create_app(hub):
                 relay=body.get("relay"),
             )
         except WiringError as err:
-            raise HTTPException(status_code=400, detail=str(err))
+            # 再生モードは配線を持たない。設定ミス (400) ではなく、
+            # 今の状態では実行できない (409) として区別する。
+            status = 409 if hasattr(hub, "seek") else 400
+            raise HTTPException(status_code=status, detail=str(err))
 
     @app.get("/api/stubs")
     def get_stubs():

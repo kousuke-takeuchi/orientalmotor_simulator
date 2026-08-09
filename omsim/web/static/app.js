@@ -208,6 +208,7 @@ function onMessage(payload) {
   pushHistory(payload.nodes);
   renderCharts(payload.nodes);
 
+  updateReplayFromPayload(payload);
   renderAlarms(payload.nodes);
   renderIo(payload.nodes);
   renderHwtoStatus(payload.nodes);
@@ -307,7 +308,22 @@ function renderHwtoStatus(nodes) {
   });
 }
 
-fetch("/api/wiring").then(function (r) { return r.json(); }).then(renderWiring);
+// 配線の取得は「通常運転だと分かってから」1 回だけ行う。再生モードには配線が
+// 無いので、先に投げると 409 がブラウザのコンソールに残ってしまう。
+// 応答が失敗したときは HWTO パネルごと隠す (落ちない)。
+var wiringRequested = false;
+
+function loadWiringOnce() {
+  if (wiringRequested) return;
+  wiringRequested = true;
+  fetch("/api/wiring").then(function (response) {
+    if (!response.ok) {
+      document.getElementById("pane-hwto").hidden = true;
+      return null;
+    }
+    return response.json();
+  }).then(function (info) { if (info) renderWiring(info); });
+}
 
 // --- アラームモニタ / I/O モニタ (P6) ---
 
@@ -372,5 +388,61 @@ function renderIo(nodes) {
     card.appendChild(renderIoRow("R-IN", R_IN_NAMES, Number(snap.remote_inputs) || 0));
     card.appendChild(renderIoRow("R-OUT", R_OUT_NAMES, Number(snap.remote_outputs) || 0));
     container.appendChild(card);
+  });
+}
+
+// --- 再生 (P7) ---
+//
+// omsim --replay で起動したときだけ /api/replay が生える。ペイロードに
+// replay が入っていたら再生ペインを出す。
+
+var replayState = { duration: 0, playing: false, seeking: false };
+
+function postReplay(body) {
+  return fetch("/api/replay", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  }).then(function (response) { return response.json(); })
+    .then(renderReplay);
+}
+
+function renderReplay(state) {
+  replayState.duration = Number(state.duration) || 0;
+  replayState.playing = Boolean(state.playing);
+  document.getElementById("pane-replay").hidden = false;
+  document.getElementById("replay-play").textContent =
+    replayState.playing ? "停止" : "再生";
+  document.getElementById("replay-position").textContent =
+    fixed(state.position, 3) + " / " + fixed(replayState.duration, 3) + " s";
+  if (!replayState.seeking && replayState.duration > 0) {
+    document.getElementById("replay-seek").value =
+      String(Math.round((state.position / replayState.duration) * 1000));
+  }
+}
+
+document.getElementById("replay-play").addEventListener("click", function () {
+  postReplay({ playing: !replayState.playing });
+});
+
+var seek = document.getElementById("replay-seek");
+seek.addEventListener("input", function () { replayState.seeking = true; });
+seek.addEventListener("change", function (event) {
+  replayState.seeking = false;
+  postReplay({ position: (Number(event.target.value) / 1000) * replayState.duration });
+});
+
+function updateReplayFromPayload(payload) {
+  if (!payload.replay) {
+    // 通常運転。ここで初めて配線を取りに行く。
+    document.getElementById("pane-replay").hidden = true;
+    loadWiringOnce();
+    return;
+  }
+  document.getElementById("pane-hwto").hidden = true;
+  renderReplay({
+    position: payload.replay.position,
+    duration: payload.replay.duration,
+    playing: replayState.playing
   });
 }

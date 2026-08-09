@@ -40,6 +40,36 @@ def load_node_mxex(manager, nodes, stream=None):
         )
 
 
+def run_replay(args):
+    """記録した jsonl を Web で再生する。CAN も シミュレーションも動かさない。"""
+    import time
+
+    from omsim.sim.replay import load_recording
+    from omsim.web.app import run_web
+    from omsim.web.replay_hub import ReplayHub
+
+    if args.web_port is None:
+        print("--replay には --web-port が必要です", file=sys.stderr)
+        return 2
+
+    recording = load_recording(args.replay)
+    hub = ReplayHub(recording)
+    run_web(hub, host=args.web_host, port=args.web_port)
+    print("omsim replay: http://{}:{}/ ({} 秒ぶん、壊れた行 {})".format(
+        args.web_host, args.web_port, round(recording.duration, 3),
+        recording.broken_lines))
+
+    interval = 0.1
+    deadline = None if args.duration is None else time.time() + args.duration
+    try:
+        while deadline is None or time.time() < deadline:
+            time.sleep(interval)
+            hub.advance(interval)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(prog="omsim", description="BLVD-KRD CANopen シミュレータ")
     parser.add_argument("--channel", default="vcan0")
@@ -71,6 +101,9 @@ def parse_args(argv):
         help="指定するとブラウザ用の Web サーバをこのポートで起動する",
     )
     parser.add_argument("--web-host", default="127.0.0.1")
+    parser.add_argument(
+        "--replay", default=None,
+        help="--record で書いた jsonl を Web で再生する (シミュレーションは動かさない)")
     parser.add_argument(
         "--mxex-diff", nargs=2, metavar=("A", "B"), default=None,
         help="2 つの .mxex を netid 単位で比較して終了する")
@@ -120,6 +153,9 @@ def main(argv=None):
         for line in format_diff(diff_mxex(*args.mxex_diff)):
             print(line)
         return 0
+
+    if args.replay:
+        return run_replay(args)
 
     recorder = Recorder(args.record)
     network = open_network(args.channel, args.interface, args.bitrate)

@@ -220,3 +220,25 @@ def test_app_js_knows_the_remote_io_default_functions():
         assert name in js
     assert "renderAlarms" in js
     assert "renderIo" in js
+
+
+def test_index_has_a_hidden_replay_pane():
+    """再生ペインは --replay のときだけ出す (通常運転では隠す)。"""
+    html = _read("index.html")
+    assert 'id="pane-replay"' in html
+    assert "hidden" in html
+    js = _read("app.js")
+    assert "/api/replay" in js
+    assert "updateReplayFromPayload" in js
+
+
+def test_app_js_only_asks_for_wiring_in_normal_mode():
+    """再生モードでは /api/wiring を投げない (409 がコンソールに残るため)。
+
+    通常運転だと分かってから 1 回だけ取りに行き、失敗時はパネルを隠す。
+    """
+    js = _read("app.js")
+    assert "loadWiringOnce" in js
+    assert "wiringRequested" in js
+    assert "response.ok" in js
+    assert 'getElementById("pane-hwto").hidden = true' in js
