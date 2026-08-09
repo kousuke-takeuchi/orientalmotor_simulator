@@ -366,6 +366,72 @@ python3 -m omsim.apps.omsim_main --replay rec.jsonl --web-port 8080 --web-host 0
 「全部通った」ように見えることはありません。シナリオの `report.html` /
 `junit.xml` / `rec.jsonl` は成果物として残ります。
 
+## ストアード / FW-RV / I/O 原点復帰 (P8)
+
+### R-IN の機能割付
+
+R-IN0-15 の既定は S-ON / PLOOP-MODE / TRQ-LMT / CLR / QSTOP / STOP / FREE / ALM-RST /
+D-SEL0-7 で、**START も JOG も既定では割り付いていません**。割付の変更
+（R-IN0 機能選択 = NET-ID 17408 / 4400h ...）は netid が 0x1000 以上のため
+**CANopen のメーカ固有領域に収まらず、SDO では触れません**。mxex から設定します。
+
+```bash
+python3 -m omsim.apps.omsim_main --node 1=設定.mxex
+# -> mxex: node_id=1 ... 8500 件中 N 件を適用 (未知 x / 拒否 y / MEXE02 専用 z)
+```
+
+信号の割付 No.（HP-5141J 14-1 実測）は `omsim/driver/io_functions.py` にあります
+（START=32 / HOME=36 / FW-JOG=48 / RV-JOG=49 / D-SEL0-7=80-87 など）。
+
+### ストアードデータ運転
+
+運転データ（運転方式・位置・速度・加減速・トルク制限）を選び、**START の立ち上がり**で
+運転します。データ No. は D-SEL0-7 の合成、どれも入っていなければ `403Dh` を使います。
+運転データ R/W コマンドは netid 空間なので **SDO では触れません**（model の API と
+mxex から設定します）。
+
+### FW/RV 運転
+
+`FW-JOG`/`RV-JOG` は押している間だけ、`FW-JOG-P`/`RV-JOG-P` は立ち上がりで移動量ぶん
+1 回だけ、`FW-SPD`/`RV-SPD` は押している間だけ連続運転します。速度は `(JOG) 運転速度`
+（既定 100 r/min）、移動量は `(JOG) 移動量`（既定 1 step）。
+
+### I/O 原点復帰運転
+
+`HOME` 信号の立ち上がりで開始します。方法は `4160h`（0:2センサ / 1:3センサ(既定) /
+2:1方向回転 / 3:押し当て）。**実装しているのは 2 センサ方式だけ**で、他は開始時に
+SDO abort になります。開始方向（`4161h` 相当）は EDS に無いため
+`set_io_homing_direction()` / mxex から設定します。
+
+## 通信途絶での自動停止（安全機能）
+
+マスタ（PC）との通信が切れたときに、ドライバ側で自動的に止める仕組みです。
+**CANopen の Heartbeat consumer（`1016h`）だけで実現でき、mxex の書き換えは要りません。**
+
+```
+1016h:01 = (マスタの node-ID << 16) | 監視時間[ms]
+例) node 3 を 500ms 監視する -> 0x000301F4
+```
+
+マスタ側は自分の `1017h`（Producer heartbeat time）に監視時間より十分短い周期を設定して
+heartbeat を出し続けます。**監視時間の 1/3 以下**を目安にしてください
+（例: 監視 500ms なら producer 100ms）。producer が監視時間に近いと、1 回取りこぼしただけで
+止まります。
+
+途絶を検出したときの挙動:
+
+- アラーム `81h`（Network bus error、EMCY は CiA301 の `8130h`）が発生
+- **無励磁になり、電磁ブレーキが保持される**（HWTO による停止と同じ形）
+- 通信が戻ってもアラームが解けるだけで、**勝手には動き出しません**。
+  Controlword bit7（Fault reset）→ 再度 enable が必要です
+
+シミュレータでの確認:
+
+```bash
+python3 -m omsim.apps.omsim_main --node 1 &
+python3 -m omsim.apps.scenario tests/scenarios/comm_loss_demo.yaml
+```
+
 ## 網羅率の確認
 
 EDS（オブジェクト辞書）に定義されたオブジェクトのうち、どこまで実装済みかを確認できます。
