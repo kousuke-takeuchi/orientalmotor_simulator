@@ -18,8 +18,12 @@ from omsim.driver.pdo import (
     RPDO_BASE_COB_ID,
     RPDO_TRANSMISSION_TYPES,
     TPDO_BASE_COB_ID,
+    MappingEntry,
     PdoCommParams,
+    PdoMappingParams,
     is_supported_tpdo_transmission_type,
+    pack_mapping_entry,
+    unpack_mapping_entry,
 )
 from omsim.driver.profile import TrapezoidProfile
 from omsim.driver.state_machine import Cia402StateMachine, State
@@ -95,6 +99,20 @@ class DriverModel(object):
             for i in range(4)
         ]
 
+        # PDO マッピングパラメータ (1600h-1603h / 1A00h-1A03h)。既定値は EDS 実測。
+        self.rpdo_mapping = [
+            PdoMappingParams([MappingEntry(0x6040, 0, 16)]),
+            PdoMappingParams([MappingEntry(0x6040, 0, 16), MappingEntry(0x6060, 0, 8)]),
+            PdoMappingParams([MappingEntry(0x6040, 0, 16), MappingEntry(0x607A, 0, 32)]),
+            PdoMappingParams([MappingEntry(0x6040, 0, 16), MappingEntry(0x60FF, 0, 32)]),
+        ]
+        self.tpdo_mapping = [
+            PdoMappingParams([MappingEntry(0x6041, 0, 16)]),
+            PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x6061, 0, 8)]),
+            PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x6064, 0, 32)]),
+            PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x606C, 0, 32)]),
+        ]
+
         # passthrough で書かれた値。インスタンスごとに独立。
         self.passthrough_values = {}
 
@@ -112,7 +130,7 @@ class DriverModel(object):
     # (test_shadow_isolation_holds_for_every_registered_writer が検出する)。
     _SHADOW_DEEP_ATTRS = (
         "state_machine", "plant", "alarms", "passthrough_values",
-        "rpdo_comm", "tpdo_comm",
+        "rpdo_comm", "rpdo_mapping", "tpdo_comm", "tpdo_mapping",
     )
 
     def _shadow(self):
@@ -628,6 +646,104 @@ class DriverModel(object):
         router.reader(_index, 5)(_read_event)
         router.writer(_index, 5)(_write_event)
     del _slot, _index
+
+    # --- PDO マッピングパラメータ (1600h-1603h / 1A00h-1A03h) ---
+
+    def _mapping_disabled_guard(self, comm_params):
+        if comm_params.valid:
+            raise ObjectAccessError(
+                ABORT_DEVICE_STATE,
+                "対応する PDO が有効 (bit31=0) な間はマッピングを変更できません")
+
+    def _write_mapping_count(self, mapping_params, comm_params, value):
+        self._mapping_disabled_guard(comm_params)
+        count = int(value)
+        if not (0 <= count <= PdoMappingParams.MAX_ENTRIES):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "マッピング数は 0-4")
+        if count == 0:
+            mapping_params.entries = []
+            return
+        if count > len(mapping_params.entries):
+            raise ObjectAccessError(
+                ABORT_DEVICE_STATE,
+                "sub{} まで書き込んでから sub0 を {} にしてください".format(count, count))
+        mapping_params.entries = mapping_params.entries[:count]
+
+    def _write_mapping_entry(self, mapping_params, comm_params, sub, value):
+        self._mapping_disabled_guard(comm_params)
+        entry = unpack_mapping_entry(int(value) & 0xFFFFFFFF)
+        if entry.length_bits % 8 != 0:
+            raise ObjectAccessError(
+                ABORT_VALUE_RANGE,
+                "{}bit はバイト境界に揃っていません (このフェーズはバイト単位のみ対応)"
+                .format(entry.length_bits))
+        while len(mapping_params.entries) < sub:
+            mapping_params.entries.append(MappingEntry(0, 0, 0))
+        mapping_params.entries[sub - 1] = entry
+
+    # RPDO マッピングパラメータ (1600h-1603h)
+    for _slot, _index in enumerate((0x1600, 0x1601, 0x1602, 0x1603)):
+        def _make_rpdo_mapping_handlers(slot=_slot):
+            def read_count(self, sub):
+                return self.rpdo_mapping[slot].count
+
+            def write_count(self, sub, value):
+                self._write_mapping_count(
+                    self.rpdo_mapping[slot], self.rpdo_comm[slot], value)
+
+            def read_entry(self, sub):
+                entries = self.rpdo_mapping[slot].entries
+                if sub > len(entries):
+                    return 0
+                e = entries[sub - 1]
+                return pack_mapping_entry(e.index, e.sub, e.length_bits)
+
+            def write_entry(self, sub, value):
+                self._write_mapping_entry(
+                    self.rpdo_mapping[slot], self.rpdo_comm[slot], sub, value)
+
+            return read_count, write_count, read_entry, write_entry
+
+        _read_count, _write_count, _read_entry, _write_entry = (
+            _make_rpdo_mapping_handlers())
+        router.reader(_index, 0)(_read_count)
+        router.writer(_index, 0)(_write_count)
+        for _sub in (1, 2, 3, 4):
+            router.reader(_index, _sub)(_read_entry)
+            router.writer(_index, _sub)(_write_entry)
+    del _slot, _index, _sub
+
+    # TPDO マッピングパラメータ (1A00h-1A03h)
+    for _slot, _index in enumerate((0x1A00, 0x1A01, 0x1A02, 0x1A03)):
+        def _make_tpdo_mapping_handlers(slot=_slot):
+            def read_count(self, sub):
+                return self.tpdo_mapping[slot].count
+
+            def write_count(self, sub, value):
+                self._write_mapping_count(
+                    self.tpdo_mapping[slot], self.tpdo_comm[slot], value)
+
+            def read_entry(self, sub):
+                entries = self.tpdo_mapping[slot].entries
+                if sub > len(entries):
+                    return 0
+                e = entries[sub - 1]
+                return pack_mapping_entry(e.index, e.sub, e.length_bits)
+
+            def write_entry(self, sub, value):
+                self._write_mapping_entry(
+                    self.tpdo_mapping[slot], self.tpdo_comm[slot], sub, value)
+
+            return read_count, write_count, read_entry, write_entry
+
+        _read_count, _write_count, _read_entry, _write_entry = (
+            _make_tpdo_mapping_handlers())
+        router.reader(_index, 0)(_read_count)
+        router.writer(_index, 0)(_write_count)
+        for _sub in (1, 2, 3, 4):
+            router.reader(_index, _sub)(_read_entry)
+            router.writer(_index, _sub)(_write_entry)
+    del _slot, _index, _sub
 
     # --- .mxex に保存される純パラメータ群 ---
     # 値を保持して読み返せるが、挙動には効かない。実装フェーズは各行のとおり。
