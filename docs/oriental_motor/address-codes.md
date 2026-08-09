@@ -37,3 +37,32 @@
 （`alarm_on_off_input` / `dual_mismatch_delay_ms`）として持つ。
 
 例外は `40D0h Clear ETO` で、これは EDS にあり SDO から実行できる（P3.5 で実装済み）。
+
+## netid と CANopen index の対応（P5 で裏取り）
+
+`scripts/extract_address_codes.py` で HP-5141J の「7 アドレスコード一覧」を機械抽出した結果、
+表の全行で次の関係が成り立つことを確認した（1584 行抽出、うち不変条件を満たさず捨てた行 121）。
+
+```
+NET-ID == Modbus 上位アドレス // 2
+Modbus 下位アドレス == Modbus 上位アドレス + 1
+```
+
+さらに `NET-ID 361` が「(HOME) 2 センサ原点復帰の戻りステップ数」であり、これは CANopen の
+`4169h`（0x169 = 361）と一致する。設計書 2.3 の
+
+```
+CANopen index = 0x4000 + netid   (bank 1)
+```
+
+が独立した経路で裏付けられた。`omsim/apps/mxex.py` はこの対応で mxex を適用する。
+
+再生成:
+
+```bash
+pdftotext -layout docs/oriental_motor/HP-5141J.pdf /tmp/5141J.txt
+python3 scripts/extract_address_codes.py /tmp/5141J.txt
+```
+
+名称が別行に折れて取れない行が 496 行ある（表の体裁による）。件数は必ず出力するので、
+「取れなかったことに気付かない」ことはない。

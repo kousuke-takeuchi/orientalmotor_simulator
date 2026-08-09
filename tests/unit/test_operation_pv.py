@@ -20,6 +20,10 @@ class Params(object):
         self.velocity_threshold_rpm = 1.0
 
     @property
+    def effective_target_velocity_rpm(self):
+        return self.target_velocity_rpm
+
+    @property
     def effective_deceleration_rpm_s(self):
         # DriverModel と同じ窓口。ここでは quick stop の切替を持たない。
         return self.profile_deceleration_rpm_s

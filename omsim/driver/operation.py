@@ -54,7 +54,8 @@ class ProfileVelocityMode(OperationMode):
         # quick-stop-active では励磁したまま 0 へ減速する (励磁の有無ではなく
         # 状態で判断しないと、クイックストップ中も指令を追い続けてしまう)。
         if ctx.state_machine.is_operation_enabled:
-            ctx.profile.set_target(ctx.units.rpm_to_internal(params.target_velocity_rpm))
+            ctx.profile.set_target(
+                ctx.units.rpm_to_internal(params.effective_target_velocity_rpm))
         else:
             ctx.profile.set_target(0.0)
 

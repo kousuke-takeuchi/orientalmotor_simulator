@@ -202,7 +202,8 @@ def test_stub_objects_lists_the_four_unimplemented_objects():
     # 1016h (Heartbeat consumer) は P3 で実働になったのでスタブではない。
     assert (0x1016, 1) not in stub_keys
     assert (0x409B, 0) in stub_keys
-    assert (0x60FE, 1) in stub_keys
+    # 60FEh:01 は P5 のリモート I/O 実装で実働になった
+    assert (0x60FE, 1) not in stub_keys
     # 6081h は pp モード実装 (P4) で実働になった
     assert (0x6081, 0) not in stub_keys
     # 1003h (エラー履歴) は実際に機能しているのでスタブではない。

@@ -14,6 +14,7 @@ from omsim.driver.alarm_model import (
     AlarmModel,
 )
 from omsim.driver.hwto import HwtoModel  # noqa: I100 (driver 層内の依存)
+from omsim.driver.direct_data import DirectDataState
 from omsim.driver.errors import (
     ABORT_DEVICE_STATE,
     ABORT_NO_DATA,
@@ -23,6 +24,7 @@ from omsim.driver.errors import (
 )
 from omsim.driver.motor_plant import MotorPlant
 from omsim.driver.objects import ObjectRouter
+from omsim.driver.operation_type import resolve_operation_type
 from omsim.driver.operation import (
     HomingMode,
     OperationContext,
@@ -127,6 +129,11 @@ class DriverModel(object):
         self.homing_completed = False
         # CN4 のリミット/HOME センサ入力 (実配線は P5)
         self.limit_inputs = {"fw_ls": False, "rv_ls": False, "home": False}
+        # ダイレクトデータ運転 (402Ch-4034h)。CiA402 の運転モードとは独立。
+        self.direct_data = DirectDataState()
+        # 実行中のダイレクトデータ運転 (None なら CiA402 モードが動く)
+        self._direct_motion = None
+
         # touch probe (60B8h-60BDh / 60D5h-60D8h)。既定 3131h は EDS 実測。
         self.touch_probe_function = 0x3131
         # probe -> {"positive": 値 or None, "negative": ..., カウンタ}
@@ -230,6 +237,8 @@ class DriverModel(object):
         "hwto",
         # 60B8h の writer は probe 無効化時にラッチ値とカウンタを捨てる。
         "touch_probe_values", "touch_probe_counters",
+        # 4033h の writer が起動待ちトリガと直近値を書き換える。
+        "direct_data",
     )
 
     def _shadow(self):
@@ -295,7 +304,14 @@ class DriverModel(object):
             self.profile.reset(0.0)
 
         ctx = self._context()
-        self.operation.step(dt, ctx)
+        self._apply_remote_inputs()
+        # ダイレクトデータ運転が動いている間は CiA402 の運転モードを止める。
+        # 両方が毎周期プロファイルを書くと指令を奪い合い、加減速レート次第で
+        # まったく加速しなくなる (実経路のテストで露見)。
+        if self._begin_direct_data():
+            self._step_direct_data(dt)
+        else:
+            self.operation.step(dt, ctx)
         self.operation.apply_status_bits(ctx)
 
         # HP-5143E 6.2 (p35) Transition 12: quick-stop-active はクイック
@@ -315,6 +331,16 @@ class DriverModel(object):
 
         self._check_heartbeat_consumer()
         self._apply_travel_limits()
+
+    @property
+    def effective_target_velocity_rpm(self):
+        """今この瞬間の速度指令。STOP 入力 (R-IN5) が入っていれば 0。
+
+        運転モード側はこの値を参照する (モードごとに同じ分岐を書かないため)。
+        """
+        if self._remote_input(self.R_IN_STOP):
+            return 0.0
+        return self.target_velocity_rpm
 
     @property
     def effective_deceleration_rpm_s(self):
@@ -415,8 +441,10 @@ class DriverModel(object):
         # 落とせば、既存の遷移ロジックがそのまま使える。
         # 両方の入力が OFF になって ETO 状態に入った場合は、入力が戻っても
         # ETO-CLR (40D0h) で解除するまで無励磁のまま (HP-5141J p204)。
+        # FREE 入力 (R-IN6) も励磁を落とす。HWTO と同じ「電圧無効」の扱い。
         self.state_machine.voltage_enabled = not (
-            self.hwto.power_cut or self.hwto.eto_active)
+            self.hwto.power_cut or self.hwto.eto_active
+            or self._remote_input(self.R_IN_FREE))
 
         alarm = self.hwto.take_pending_alarm()
         if alarm == "circuit":
@@ -676,13 +704,86 @@ class DriverModel(object):
             raise ObjectAccessError(ABORT_VALUE_RANGE, "6072h は 0-10000")
         self.max_torque_permille = int(value)
 
-    @router.reader(0x60FE, 1, stub="P5: HWTO/デジタル出力の意味付け未実装（値の保持のみ）")
+    # --- リモート I/O (60FEh:01 = 403Eh、60FDh bit16-31 = 403Fh) ---
+    #
+    # HP-5143E 60FDh/60FEh 実測のビット割付 (既定機能):
+    #   R-IN0..15  (bit16-31 of 60FEh:01 / 403Eh)
+    #     S-ON / PLOOP-MODE / TRQ-LMT / CLR / QSTOP / STOP / FREE / ALM-RST /
+    #     D-SEL0..7
+    #   R-OUT0..15 (bit16-31 of 60FDh / 403Fh)
+    #     SON-MON / PLOOP-MON / TRQ-LMTD / RDY-DD-OPE / ABSPEN / STOP_R /
+    #     FREE_R / ALM-A / SYS-BSY / IN-POS / RDY-HOME-OPE / RDY-FWRV-OPE /
+    #     RDY-SD-OPE / MOVE / VA / TLC
+    # 機能割付の変更 (DIN/DOUT/R-I/O 機能選択パラメータ) は未実装で、
+    # 既定割付のみを扱う。
+
+    R_IO_BASE_BIT = 16
+
+    R_IN_S_ON = 0
+    R_IN_CLR = 3
+    R_IN_QSTOP = 4
+    R_IN_STOP = 5
+    R_IN_FREE = 6
+    R_IN_ALM_RST = 7
+
+    R_OUT_SON_MON = 0
+    R_OUT_TRQ_LMTD = 2
+    R_OUT_ALM_A = 7
+    R_OUT_MOVE = 13
+    R_OUT_VA = 14
+    R_OUT_TLC = 15
+
+    def _remote_input(self, bit):
+        return bool(self.digital_outputs & (1 << (self.R_IO_BASE_BIT + bit)))
+
+    @router.reader(0x60FE, 1)
     def _read_digital_outputs(self, sub):
         return self.digital_outputs
 
-    @router.writer(0x60FE, 1, stub="P5: HWTO/デジタル出力の意味付け未実装（値の保持のみ）")
+    @router.writer(0x60FE, 1)
     def _write_digital_outputs(self, sub, value):
         self.digital_outputs = int(value) & 0xFFFFFFFF
+
+    @router.reader(0x403E)
+    def _read_driver_input_command(self, sub):
+        # 60FEh:01 と同じレジスタ (R-IN の入力ビット)
+        return self.digital_outputs
+
+    @router.writer(0x403E)
+    def _write_driver_input_command(self, sub, value):
+        self.digital_outputs = int(value) & 0xFFFFFFFF
+
+    @router.reader(0x403F)
+    def _read_driver_output_status(self, sub):
+        value = 0
+        base = self.R_IO_BASE_BIT
+        if self.plant.excited:
+            value |= 1 << (base + self.R_OUT_SON_MON)
+        if self.alarms.is_active:
+            value |= 1 << (base + self.R_OUT_ALM_A)
+        if abs(self.actual_velocity_rpm) > self.velocity_threshold_rpm:
+            value |= 1 << (base + self.R_OUT_MOVE)
+        if self.state_machine.target_reached:
+            value |= 1 << (base + self.R_OUT_VA)
+        if self.state_machine.torque_limit_active:
+            value |= 1 << (base + self.R_OUT_TLC)
+            value |= 1 << (base + self.R_OUT_TRQ_LMTD)
+        return value
+
+    def _apply_remote_inputs(self):
+        """R-IN の入力をドライバの挙動へ反映する。
+
+        FREE は励磁を落として自由回転、STOP は減速停止、QSTOP はクイック
+        ストップ、CLR は位置偏差クリア。STOP / QSTOP / CLR は Statusword
+        bit11 (Internal limit active) を立てる (HP-5143E 7.3.4 実測)。
+        """
+        if self._remote_input(self.R_IN_QSTOP):
+            self.state_machine.write_controlword(
+                (self.state_machine.controlword & ~0x0004) | 0x0002)
+        self._remote_input_limit = (
+            self._remote_input(self.R_IN_STOP)
+            or self._remote_input(self.R_IN_QSTOP)
+            or self._remote_input(self.R_IN_CLR))
 
     @router.reader(0x1003, 0)
     def _read_error_field_count(self, sub):
@@ -763,7 +864,8 @@ class DriverModel(object):
     def _apply_travel_limits(self):
         """リミットに当たっていたら、その方向の動きだけを止める。"""
         blocked = self._blocked_direction()
-        self.state_machine.internal_limit_active = blocked != 0
+        self.state_machine.internal_limit_active = (
+            blocked != 0 or getattr(self, "_remote_input_limit", False))
         if blocked == 0:
             return
         velocity = self.plant.velocity
@@ -781,6 +883,168 @@ class DriverModel(object):
             self.plant.preset_position(window[1])
         elif position < window[0]:
             self.plant.preset_position(window[0])
+
+    # --- ダイレクトデータ運転 (402Ch-4034h) ---
+
+    @property
+    def direct_data_lifetime(self):
+        return self.direct_data.lifetime
+
+    def _start_direct_motion(self, kind):
+        """反映トリガで起動する。励磁していなければ起動しない。"""
+        if not self.plant.excited:
+            return
+        data = self.direct_data
+        if kind == "immediate_stop":
+            self.profile.reset(0.0)
+            self.plant.velocity = 0.0
+            self._direct_motion = None
+            return
+        # 反映トリガを書いた時点の運転データを取り込む。以後 402Eh-4031h を
+        # 書き換えても、次のトリガまでは効かない (HP-5141J 4 章「データの
+        # 書き換えと運転の開始を同時に行なう」)。
+        snapshot = {
+            "velocity": int(data.velocity),
+            "acceleration": int(data.acceleration),
+            "deceleration": int(data.deceleration),
+        }
+        if kind == "deceleration_stop":
+            snapshot["kind"] = "stop"
+            self._direct_motion = snapshot
+            return
+        if kind == "continuous_velocity":
+            snapshot["kind"] = "velocity"
+            self._direct_motion = snapshot
+            return
+        if kind == "absolute":
+            target = int(data.position)
+        elif kind == "relative_command":
+            # 指令位置基準。指令位置は台形プロファイルの積分ではなく実位置に
+            # 追従しているため、ここでは実位置を基準にする (検出位置基準との
+            # 差は P6 で指令位置を別管理するときに入れる)。
+            target = int(self.plant.position) + int(data.position)
+        elif kind == "relative_detected":
+            target = int(self.plant.position) + int(data.position)
+        else:
+            return
+        snapshot["kind"] = "position"
+        snapshot["target"] = target
+        self._direct_motion = snapshot
+
+    def _begin_direct_data(self):
+        """起動待ちの反映トリガを処理し、運転中かどうかを返す。
+
+        True を返す間は CiA402 の運転モードを動かさない。
+        """
+        pending = self.direct_data.take_pending_start()
+        if pending is not None:
+            self._start_direct_motion(pending)
+        if self._direct_motion is not None and not self.plant.excited:
+            self._direct_motion = None
+        return self._direct_motion is not None
+
+    def _step_direct_data(self, dt):
+        """ダイレクトデータ運転を 1 ステップ進める。"""
+        motion = self._direct_motion
+        if motion is None:
+            return
+
+        self.profile.acceleration = self.units.rpm_to_internal(motion["acceleration"])
+        self.profile.deceleration = self.units.rpm_to_internal(motion["deceleration"])
+
+        if motion["kind"] == "velocity":
+            self.profile.set_target(self.units.rpm_to_internal(motion["velocity"]))
+        elif motion["kind"] == "stop":
+            self.profile.set_target(0.0)
+            if abs(self.plant.velocity) <= self.units.rpm_to_internal(
+                    self.velocity_threshold_rpm):
+                self._direct_motion = None
+        else:
+            remaining = motion["target"] - int(self.plant.position)
+            threshold = self.units.rpm_to_internal(self.velocity_threshold_rpm)
+            if abs(remaining) <= 2 and abs(self.plant.velocity) <= threshold:
+                self.profile.set_target(0.0)
+                self._direct_motion = None
+            else:
+                max_velocity = self.units.rpm_to_internal(motion["velocity"])
+                deceleration = self.units.rpm_to_internal(motion["deceleration"])
+                stoppable = (2.0 * deceleration * abs(remaining)) ** 0.5
+                velocity = min(max_velocity, stoppable)
+                self.profile.set_target(velocity if remaining > 0 else -velocity)
+
+        self.profile.step(dt)
+        self.plant.step(dt, self.profile.command)
+
+    @router.reader(0x402C)
+    def _read_direct_data_number(self, sub):
+        return self.direct_data.data_number
+
+    @router.writer(0x402C)
+    def _write_direct_data_number(self, sub, value):
+        self.direct_data.data_number = int(value)
+
+    @router.reader(0x402D)
+    def _read_direct_operation_type(self, sub):
+        return self.direct_data.operation_type
+
+    @router.writer(0x402D)
+    def _write_direct_operation_type(self, sub, value):
+        resolve_operation_type(value)   # 未対応/範囲外はここで abort
+        self.direct_data.operation_type = int(value)
+
+    @router.reader(0x402E)
+    def _read_direct_position(self, sub):
+        return _clamp_int32(self.direct_data.position)
+
+    @router.writer(0x402E)
+    def _write_direct_position(self, sub, value):
+        self.direct_data.position = _clamp_int32(value)
+
+    @router.reader(0x402F)
+    def _read_direct_velocity(self, sub):
+        return int(self.direct_data.velocity)
+
+    @router.writer(0x402F)
+    def _write_direct_velocity(self, sub, value):
+        self.direct_data.velocity = int(value)
+
+    @router.reader(0x4030)
+    def _read_direct_acceleration(self, sub):
+        return int(self.direct_data.acceleration)
+
+    @router.writer(0x4030)
+    def _write_direct_acceleration(self, sub, value):
+        if int(value) <= 0:
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "4030h は 1 以上")
+        self.direct_data.acceleration = int(value)
+
+    @router.reader(0x4031)
+    def _read_direct_deceleration(self, sub):
+        return int(self.direct_data.deceleration)
+
+    @router.writer(0x4031)
+    def _write_direct_deceleration(self, sub, value):
+        if int(value) <= 0:
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "4031h は 1 以上")
+        self.direct_data.deceleration = int(value)
+
+    @router.reader(0x4033)
+    def _read_direct_trigger(self, sub):
+        return self.direct_data.encoded_trigger()
+
+    @router.writer(0x4033)
+    def _write_direct_trigger(self, sub, value):
+        self.direct_data.write_trigger(value)
+
+    @router.reader(0x4034)
+    def _read_direct_forwarding_destination(self, sub):
+        return self.direct_data.forwarding_destination
+
+    @router.writer(0x4034)
+    def _write_direct_forwarding_destination(self, sub, value):
+        if int(value) not in (0, 1):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "4034h は 0 か 1")
+        self.direct_data.forwarding_destination = int(value)
 
     # --- touch probe (60B8h-60BDh / 60D5h-60D8h) ---
 

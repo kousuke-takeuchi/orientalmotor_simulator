@@ -246,6 +246,53 @@ bit5=1 で運転中の即時差し替え、bit6=1 で相対位置決め、bit8=1
   `60D5h`-`60D8h`（カウンタ）。トリガは `DriverModel.trigger_touch_probe(probe, edge)` で与えます。
   ZSG-N をトリガ源にする設定は未実装のため abort します。
 
+## メーカ固有運転 / リモート I/O / mxex (P5)
+
+### ダイレクトデータ運転
+
+CiA402 の運転モードとは独立した、オリエンタルモーター固有の運転系統です。
+`402Dh` に運転方式、`402Eh`/`402Fh`/`4030h`/`4031h` にデータを書き、`4033h`
+（反映トリガ）を書いた瞬間に運転が始まります。
+
+- `4033h` は **上位 16bit = ライフタイム / 下位 16bit = 反映トリガ**。
+  どちらかが範囲外なら**上位下位とも反映しません**（仕様どおり）。
+- 反映トリガ `1`（`2`/`3` も同じ）で通常起動。**同じ値を書いても起動しません**。
+- トリガ自動クリア（既定有効）で下位 16bit は 0 に戻ります。
+- 運転データは**トリガを書いた時点の値が使われます**（以後の書き換えは次のトリガまで効かない）。
+- 対応する運転方式: `0` 減速停止 / `1` 絶対位置決め / `2` 相対位置決め（指令位置基準）/
+  `3` 相対位置決め（検出位置基準）/ `16` 連続運転（速度制御）/ `32` 即停止。
+  それ以外（WRAP 系・押し当て系・連続運転（位置制御）・モーション拡張モード）は
+  一覧にはありますが未実装で、書き込むと SDO abort になります。
+- 単位指定起動（反映トリガ 4-19）と個別項目トリガ（負値）も未実装で abort します。
+
+例: `tests/scenarios/direct_data_demo.yaml`
+
+### リモート I/O
+
+`60FEh:01` と `403Eh` は同じレジスタで、bit16-31 が R-IN0..15
+（S-ON / PLOOP-MODE / TRQ-LMT / CLR / QSTOP / STOP / FREE / ALM-RST / D-SEL0..7）。
+`403Fh` と `60FDh` の bit16-31 が R-OUT0..15
+（SON-MON / PLOOP-MON / TRQ-LMTD / RDY-DD-OPE / ABSPEN / STOP_R / FREE_R / ALM-A /
+SYS-BSY / IN-POS / RDY-HOME-OPE / RDY-FWRV-OPE / RDY-SD-OPE / MOVE / VA / TLC）。
+
+現在効くのは FREE（励磁 OFF）、STOP（減速停止）、QSTOP（クイックストップ）と、
+出力側の SON-MON / ALM-A / MOVE / VA / TLC / TRQ-LMTD です。
+機能割付の変更（DIN/DOUT/R-I/O 機能選択）は未実装で、既定割付のみを扱います。
+
+### mxex の適用と比較
+
+```bash
+# 起動時に各ノードへ適用する (適用件数・未知・拒否を必ず表示)
+python3 -m omsim.apps.omsim_main --node 1=右モーター.mxex --node 2=左モーター.mxex
+
+# 2 つの mxex を netid 単位で比較する
+python3 -m omsim.apps.omsim_main --mxex-diff 右モーター.mxex 左モーター.mxex
+```
+
+netid と CANopen index の対応は `CANopen index = 0x4000 + netid`（bank 1）。
+`docs/oriental_motor/address-codes.md` に、アドレスコード表からの裏取りと
+実機 mxex の実測値を記録しています。
+
 ## 網羅率の確認
 
 EDS（オブジェクト辞書）に定義されたオブジェクトのうち、どこまで実装済みかを確認できます。
