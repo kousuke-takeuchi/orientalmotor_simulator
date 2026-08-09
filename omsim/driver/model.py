@@ -250,6 +250,8 @@ class DriverModel(object):
             "actual_velocity_rpm": self.actual_velocity_rpm,
             "actual_position": self.plant.position,
             "torque_permille": self.plant.torque_permille,
+            # 3D 表示が軸の回転角を出すのに使う。JS 側に定数を二重に持たない。
+            "increments_per_revolution": self.units.increments_per_shaft_rev,
             "alarm": self.alarms.active_alarm,
             "alarm_history": self.alarms.history,
         }

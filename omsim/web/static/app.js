@@ -196,6 +196,8 @@ function onMessage(payload) {
   pushHistory(payload.nodes);
   renderCharts(payload.nodes);
 
+  if (window.omsimMotor3d) window.omsimMotor3d.update(payload);
+
   state.frames = payload.frames;
   if (!state.canlogPaused) renderCanLog(payload.frames);
 }

@@ -138,3 +138,37 @@ def test_app_js_top_level_vars_do_not_collide_with_window_globals():
             collisions
         )
     )
+
+
+# --- 3D ペイン (P3.5) ---
+
+def test_index_has_the_3d_pane_and_loads_motor3d():
+    html = _read("index.html")
+    assert 'id="pane-3d"' in html
+    assert "motor3d.js" in html
+
+
+def test_three_js_is_vendored_locally():
+    """CDN は使わない (オフライン前提)。同梱物とライセンス・版の記録を必須にする。"""
+    path = os.path.join(STATIC_DIR, "vendor", "three.module.min.js")
+    assert os.path.exists(path)
+    assert os.path.getsize(path) > 100000
+    readme = _read(os.path.join("vendor", "README.md"))
+    assert "0.169.0" in readme
+    assert os.path.exists(os.path.join(STATIC_DIR, "vendor", "THREE-LICENSE.txt"))
+
+
+def test_motor3d_does_not_reference_any_external_host():
+    js = _read("motor3d.js")
+    assert "http://" not in js
+    assert "https://" not in js
+    assert "./vendor/three.module.min.js" in js
+
+
+def test_motor3d_top_level_vars_do_not_collide_with_window_globals():
+    js = _read("motor3d.js")
+    top_level_var_names = re.findall(r"(?m)^var\s+([A-Za-z_$][\w$]*)", js)
+    collisions = sorted(set(top_level_var_names) & DANGEROUS_WINDOW_GLOBALS)
+    assert not collisions, (
+        "motor3d.js のトップレベル var が window の標準プロパティと衝突しています: "
+        "{}".format(collisions))

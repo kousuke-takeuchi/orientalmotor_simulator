@@ -197,3 +197,11 @@ def test_websocket_disconnect_does_not_log_a_warning():
     assert not records, "切断だけで警告ログが出てはいけない: %r" % (
         [r.getMessage() for r in records]
     )
+
+
+def test_snapshot_exposes_increments_per_revolution_for_the_3d_view():
+    """3D 表示の回転角計算に使う。JS 側に定数を二重に持たせないための口。"""
+    from omsim.driver.model import DriverModel
+
+    snapshot = DriverModel(node_id=1).snapshot()
+    assert snapshot["increments_per_revolution"] == 3600
