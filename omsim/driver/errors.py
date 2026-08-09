@@ -8,6 +8,10 @@ ABORT_DEVICE_STATE = 0x08000022
 # CiA301: 「アプリケーションにデータが無い」。1003h のまだ記録されていない
 # sub-index を読んだ場合など。
 ABORT_NO_DATA = 0x08000024
+# CiA301: データが保存できない。1010h/1011h に誤った署名を書いた場合など。
+ABORT_CANNOT_STORE = 0x08000020
+# CiA301: ハードウェアの都合で処理できなかった (保存/復帰の失敗)。
+ABORT_HARDWARE_ERROR = 0x06060000
 
 
 class ObjectAccessError(Exception):

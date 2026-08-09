@@ -22,6 +22,7 @@ from omsim.driver.alarm_model import (
 from omsim.driver.hwto import HwtoModel  # noqa: I100 (driver 層内の依存)
 from omsim.driver.direct_data import DirectDataState
 from omsim.driver.errors import (
+    ABORT_CANNOT_STORE,
     ABORT_DEVICE_STATE,
     ABORT_NO_DATA,
     ABORT_VALUE_RANGE,
@@ -37,6 +38,12 @@ from omsim.driver.operation import (
     ProfilePositionMode,
     ProfileTorqueMode,
     ProfileVelocityMode,
+)
+from omsim.driver.persistence import (
+    LOAD_SIGNATURE,
+    SAVE_SIGNATURE,
+    STORAGE_CAPABILITY,
+    is_communication_object,
 )
 from omsim.driver.pdo import (
     RPDO_BASE_COB_ID,
@@ -219,6 +226,9 @@ class DriverModel(object):
             PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x6064, 0, 32)]),
             PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x606C, 0, 32)]),
         ]
+
+        # 1010h で保存したパラメータ (実機の不揮発メモリ相当)
+        self._saved_parameters = {}
 
         # passthrough で書かれた値。インスタンスごとに独立。
         self.passthrough_values = {}
@@ -902,6 +912,97 @@ class DriverModel(object):
             self.plant.preset_position(window[1])
         elif position < window[0]:
             self.plant.preset_position(window[0])
+
+    # --- パラメータの保存 / 既定値復帰 (1010h / 1011h) ---
+
+    def _snapshot_parameters(self, communication_only=False):
+        """読み書きできるオブジェクトの現在値を集める。"""
+        values = {}
+        for index, sub in sorted(self.router.implemented_keys()):
+            if communication_only and not is_communication_object(index):
+                continue
+            if not self.router.has_writer(index, sub):
+                continue
+            try:
+                values[(index, sub)] = self.read_object(index, sub)
+            except ObjectAccessError:
+                continue
+        return values
+
+    def _apply_parameters(self, values):
+        """集めた値を書き戻す。書けなかったものは無視する (読み専用など)。"""
+        for (index, sub), value in sorted(values.items()):
+            if value is None:
+                continue
+            try:
+                self.write_object(index, sub, value)
+            except ObjectAccessError:
+                continue
+
+    def restore_saved_parameters(self):
+        """1010h で保存した値を書き戻す (電源再投入相当)。"""
+        self._apply_parameters(self._saved_parameters)
+
+    @router.reader(0x1010, 0)
+    def _read_store_count(self, sub):
+        return 2
+
+    @router.reader(0x1010, 1)
+    def _read_store_all(self, sub):
+        return STORAGE_CAPABILITY
+
+    @router.reader(0x1010, 2)
+    def _read_store_communication(self, sub):
+        return STORAGE_CAPABILITY
+
+    def _store(self, value, communication_only):
+        if int(value) & 0xFFFFFFFF != SAVE_SIGNATURE:
+            raise ObjectAccessError(
+                ABORT_CANNOT_STORE,
+                "1010h には署名 \"save\" (65766173h) を書いてください")
+        snapshot = self._snapshot_parameters(communication_only)
+        if communication_only:
+            self._saved_parameters.update(snapshot)
+        else:
+            self._saved_parameters = snapshot
+
+    @router.writer(0x1010, 1)
+    def _write_store_all(self, sub, value):
+        self._store(value, communication_only=False)
+
+    @router.writer(0x1010, 2)
+    def _write_store_communication(self, sub, value):
+        self._store(value, communication_only=True)
+
+    @router.reader(0x1011, 0)
+    def _read_restore_count(self, sub):
+        return 2
+
+    @router.reader(0x1011, 1)
+    def _read_restore_all(self, sub):
+        return STORAGE_CAPABILITY
+
+    @router.reader(0x1011, 2)
+    def _read_restore_communication(self, sub):
+        return STORAGE_CAPABILITY
+
+    def _restore_defaults(self, value, communication_only):
+        if int(value) & 0xFFFFFFFF != LOAD_SIGNATURE:
+            raise ObjectAccessError(
+                ABORT_CANNOT_STORE,
+                "1011h には署名 \"load\" (64616F6Ch) を書いてください")
+        # 既定値の正は「生まれたての DriverModel」。個別に既定値表を持つと
+        # 実装と二重管理になってずれる。
+        fresh = DriverModel(node_id=self.node_id)
+        self._apply_parameters(fresh._snapshot_parameters(communication_only))
+
+    @router.writer(0x1011, 1)
+    def _write_restore_all(self, sub, value):
+        self._restore_defaults(value, communication_only=False)
+
+    @router.writer(0x1011, 2)
+    def _write_restore_communication(self, sub, value):
+        self._restore_defaults(value, communication_only=True)
 
     # --- ダイレクトデータ運転 (402Ch-4034h) ---
 
