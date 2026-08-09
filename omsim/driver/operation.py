@@ -3,6 +3,8 @@
 DriverModel は「どのモードか」を選ぶだけにして、モードごとの制御則と
 Statusword のモード固有ビット (bit10/12/13) の意味づけをここに閉じ込める。
 P4 で pp / hm / tq を足すときは、このクラスを増やすだけで済む形にしてある。
+モード固有ビット (bit10/12/13) の意味はモードごとに違う (pv の bit12 は
+「速度が 0」、pp では Set point acknowledge、hm では Homing attained)。
 
 参照: HP-5143E 7 章 (Operation mode)
 """
@@ -73,3 +75,134 @@ class ProfileVelocityMode(OperationMode):
         ctx.state_machine.operation_mode_specific_12 = (
             abs(actual_rpm) <= params.velocity_threshold_rpm
         )
+
+
+class ProfilePositionMode(OperationMode):
+    """Profile Position Mode (pp)。HP-5143E 7.3 (p42-46)。
+
+    Controlword: bit4 NSP (New set point) / bit5 IMM (Change set immediately) /
+                 bit6 REL (Abs/rel) / bit8 HALT
+    Statusword : bit10 TR (Target reached) / bit12 SPA (Set point acknowledge)
+
+    位置決めは「残距離から出せる最大速度」を毎周期求め、それを速度指令として
+    既存の台形プロファイル (TrapezoidProfile) に渡す形で作る。加減速の形は
+    pv と同じ経路を通るので、6083h/6084h の意味が 2 か所に分かれない。
+    """
+
+    MODE_CODE = 1
+
+    CW_NEW_SET_POINT = 1 << 4
+    CW_CHANGE_IMMEDIATELY = 1 << 5
+    CW_RELATIVE = 1 << 6
+    CW_HALT = 1 << 8
+
+    # 目標位置に「着いた」とみなす窓 [increment]。1 増分ぶんの丸めを許す。
+    POSITION_WINDOW = 2
+
+    def __init__(self):
+        self._previous_new_set_point = False
+        self._active_target = None      # 実行中の目標位置 (絶対, increment)
+        self._pending_target = None     # IMM=0 のときに 1 段だけ保持する目標
+        self._halted = False
+
+    @property
+    def mode_code(self):
+        return self.MODE_CODE
+
+    def _absolute_target(self, ctx, relative):
+        target = int(ctx.params.target_position)
+        if relative:
+            return int(ctx.plant.position) + target
+        return target
+
+    def _handle_set_point(self, ctx, controlword):
+        new_set_point = bool(controlword & self.CW_NEW_SET_POINT)
+        rising = new_set_point and not self._previous_new_set_point
+        self._previous_new_set_point = new_set_point
+        if not rising:
+            return
+
+        relative = bool(controlword & self.CW_RELATIVE)
+        immediately = bool(controlword & self.CW_CHANGE_IMMEDIATELY)
+        target = self._absolute_target(ctx, relative)
+
+        if self._active_target is None or immediately:
+            self._active_target = target
+            self._pending_target = None
+        else:
+            # Set of set-points: 現在の位置決めが終わってから開始する
+            self._pending_target = target
+
+    def _command_velocity(self, ctx):
+        """残距離から、今出してよい速度 [internal] を返す。"""
+        params = ctx.params
+        remaining = self._active_target - int(ctx.plant.position)
+        if abs(remaining) <= self.POSITION_WINDOW:
+            return 0.0
+
+        max_velocity = ctx.units.rpm_to_internal(params.profile_velocity_rpm)
+        deceleration = ctx.units.rpm_to_internal(params.effective_deceleration_rpm_s)
+        # 残距離で止まりきれる速度。v^2 = 2*a*s
+        stoppable = (2.0 * deceleration * abs(remaining)) ** 0.5
+        velocity = min(max_velocity, stoppable)
+        return velocity if remaining > 0 else -velocity
+
+    def step(self, dt, ctx):
+        params = ctx.params
+        controlword = ctx.state_machine.controlword
+        self._halted = bool(controlword & self.CW_HALT)
+        self._handle_set_point(ctx, controlword)
+
+        ctx.profile.acceleration = ctx.units.rpm_to_internal(
+            params.profile_acceleration_rpm_s)
+        ctx.profile.deceleration = ctx.units.rpm_to_internal(
+            params.effective_deceleration_rpm_s)
+
+        if not ctx.state_machine.is_operation_enabled:
+            self._active_target = None
+            self._pending_target = None
+            ctx.profile.set_target(0.0)
+        elif self._halted:
+            # HP-5143E 7.3.3: HALT=1 は 605Dh (Halt option code) に従って停止。
+            # 605Dh は 1 (slow down ramp) のみ有効なので減速停止で固定。
+            ctx.profile.set_target(0.0)
+        elif self._active_target is None:
+            ctx.profile.set_target(0.0)
+        else:
+            ctx.profile.set_target(self._command_velocity(ctx))
+
+        ctx.profile.step(dt)
+        ctx.plant.step(dt, ctx.profile.command)
+
+        self._advance_set_points(ctx)
+
+    def _advance_set_points(self, ctx):
+        if self._active_target is None or self._halted:
+            return
+        arrived = (
+            abs(self._active_target - int(ctx.plant.position)) <= self.POSITION_WINDOW
+            and abs(ctx.plant.velocity) <= ctx.units.rpm_to_internal(
+                ctx.params.velocity_threshold_rpm)
+        )
+        if not arrived:
+            return
+        if self._pending_target is not None:
+            self._active_target, self._pending_target = self._pending_target, None
+        else:
+            self._active_target = None
+
+    def apply_status_bits(self, ctx):
+        if self._halted:
+            # HALT=1 のときの bit10 は「モーターが停止した」の意味 (7.3.4)。
+            ctx.state_machine.target_reached = (
+                abs(ctx.units.internal_to_rpm(ctx.plant.velocity))
+                <= ctx.params.velocity_threshold_rpm)
+        else:
+            ctx.state_machine.target_reached = (
+                ctx.state_machine.is_operation_enabled
+                and self._active_target is None
+                and self._pending_target is None)
+
+        # bit12 SPA: 受理した set-point を処理中かどうか。
+        ctx.state_machine.operation_mode_specific_12 = (
+            self._active_target is not None or self._pending_target is not None)

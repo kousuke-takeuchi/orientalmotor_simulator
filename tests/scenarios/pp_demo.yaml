@@ -1,0 +1,17 @@
+name: pp モードで 5 回転の絶対位置決めをする
+nodes: [1]
+steps:
+  - nmt: start
+  - sdo_write: {index: 0x6060, value: 1}      # pp モード
+  - sdo_write: {index: 0x6081, value: 300}    # プロファイル速度 300 r/min
+  - sdo_write: {index: 0x6083, value: 6000}
+  - sdo_write: {index: 0x6084, value: 6000}
+  - sdo_write: {index: 0x6040, value: 0x0006}
+  - sdo_write: {index: 0x6040, value: 0x0007}
+  - sdo_write: {index: 0x6040, value: 0x000F}
+  - sdo_write: {index: 0x607A, value: 18000}  # 3600 inc/rev x 5 回転
+  - sdo_write: {index: 0x6040, value: 0x001F} # New set point 0->1
+  - expect: {index: 0x6041, mask: 0x1000, value: 0x1000, timeout: 1.0}  # SPA=1
+  - expect: {index: 0x6064, value: 18000, tolerance: 30, timeout: 10.0}
+  - expect: {index: 0x6041, mask: 0x0400, value: 0x0400, timeout: 2.0}  # Target reached
+  - expect: {index: 0x6041, mask: 0x1000, value: 0x0000, timeout: 2.0}  # SPA=0

@@ -23,7 +23,11 @@ from omsim.driver.errors import (
 )
 from omsim.driver.motor_plant import MotorPlant
 from omsim.driver.objects import ObjectRouter
-from omsim.driver.operation import OperationContext, ProfileVelocityMode
+from omsim.driver.operation import (
+    OperationContext,
+    ProfilePositionMode,
+    ProfileVelocityMode,
+)
 from omsim.driver.pdo import (
     RPDO_BASE_COB_ID,
     RPDO_TRANSMISSION_TYPES,
@@ -112,6 +116,10 @@ class DriverModel(object):
         self.direct_torque_limit_permille = 10000
         self.digital_outputs = 0
         self.profile_velocity_rpm = 1
+        # pp (Profile Position) 用
+        self.target_position = 0
+        self.end_velocity = 0
+        self.positioning_option_code = 0
         self.consumer_heartbeat_config = 0
         self.producer_heartbeat_config = 0
         # 停止動作の option code (HP-5143E 605Ah-605Eh 実測の既定値)。
@@ -553,15 +561,23 @@ class DriverModel(object):
     def _read_mode(self, sub):
         return self.mode
 
+    _OPERATION_MODES = {
+        MODE_PV: ProfileVelocityMode,
+        MODE_PP: ProfilePositionMode,
+    }
+
     @router.writer(0x6060)
     def _write_mode(self, sub, value):
         mode = int(value)
-        if mode != MODE_PV:
+        factory = self._OPERATION_MODES.get(mode)
+        if factory is None:
             raise NotImplementedObjectError(
                 ABORT_DEVICE_STATE,
-                "運転モード {} は未実装 (P4 で実装予定, 6060h)".format(mode))
+                "運転モード {} は未実装 (tq/hm は P4 の後続タスク, 6060h)".format(mode))
+        if mode == self.mode:
+            return
         self.mode = mode
-        self.operation = ProfileVelocityMode()
+        self.operation = factory()
 
     @router.reader(0x6061)
     def _read_mode_display(self, sub):
@@ -671,11 +687,56 @@ class DriverModel(object):
     def _read_main_power_current(self, sub):
         return 0
 
-    @router.reader(0x6081, stub="P4: pp (プロファイル位置) モード未実装。値の保持のみ")
+    @router.reader(0x607A)
+    def _read_target_position(self, sub):
+        return _clamp_int32(self.target_position)
+
+    @router.writer(0x607A)
+    def _write_target_position(self, sub, value):
+        self.target_position = _clamp_int32(value)
+
+    @router.reader(0x6082)
+    def _read_end_velocity(self, sub):
+        return int(self.end_velocity)
+
+    @router.writer(0x6082)
+    def _write_end_velocity(self, sub, value):
+        # 6082h は「加速終了時の速度」ではなく位置決め終了時の速度。0 以外は
+        # 未対応。黙って 0 として動かすと「設定したのに効かない」嘘になるため
+        # 明示的に拒否する。
+        if int(value) != 0:
+            raise ObjectAccessError(
+                ABORT_VALUE_RANGE, "6082h は 0 以外未対応 (位置決めは必ず停止で終わる)")
+        self.end_velocity = 0
+
+    _POSITIONING_OPTION_SUPPORTED_MASK = 0x00C3   # bit0-1 (RO) と bit6-7 (RADO)
+
+    @router.reader(0x60F2)
+    def _read_positioning_option_code(self, sub):
+        return self.positioning_option_code
+
+    @router.writer(0x60F2)
+    def _write_positioning_option_code(self, sub, value):
+        raw = int(value) & 0xFFFF
+        # HP-5143E 7.3.6 実測: Change immediately option (bit2-3) /
+        # Request-response option (bit4-5) / IP option (bit8-11) は
+        # 「Not supported」。立てられたら abort する。
+        if raw & ~self._POSITIONING_OPTION_SUPPORTED_MASK:
+            raise ObjectAccessError(
+                ABORT_VALUE_RANGE,
+                "60F2h の {:04X}h には未サポートのオプションが含まれています".format(raw))
+        if raw:
+            raise NotImplementedObjectError(
+                ABORT_VALUE_RANGE,
+                "60F2h: Relative option / Rotary axis direction option は"
+                "値 0 (既定) のみ実装 (P4 の後続タスク)")
+        self.positioning_option_code = raw
+
+    @router.reader(0x6081)
     def _read_profile_velocity(self, sub):
         return int(self.profile_velocity_rpm)
 
-    @router.writer(0x6081, stub="P4: pp (プロファイル位置) モード未実装。値の保持のみ")
+    @router.writer(0x6081)
     def _write_profile_velocity(self, sub, value):
         if int(value) < 0:
             raise ObjectAccessError(ABORT_VALUE_RANGE, "6081h は 0 以上")

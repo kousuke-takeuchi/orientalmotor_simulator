@@ -36,13 +36,13 @@ def test_mode_display_follows_mode_of_operation():
 def test_unsupported_mode_is_reported_as_not_implemented():
     model = DriverModel(node_id=1)
     with pytest.raises(NotImplementedObjectError) as exc:
-        model.write_object(0x6060, 0, 1)
+        model.write_object(0x6060, 0, 4)   # tq は P4 の後続タスク
     # NotImplementedObjectError は ObjectAccessError のサブクラスなので
     # od_bridge.py の SDO abort への変換対象に入る（生の NotImplementedError
     # は変換対象外で汎用 abort に潰れ、メッセージが消えていた）。
     assert isinstance(exc.value, ObjectAccessError)
     assert exc.value.abort_code == ABORT_DEVICE_STATE
-    assert "1" in str(exc.value)
+    assert "4" in str(exc.value)
 
 
 def test_statusword_shows_operation_enabled():
