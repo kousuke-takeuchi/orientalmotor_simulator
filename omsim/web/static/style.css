@@ -1,0 +1,51 @@
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Noto Sans JP", sans-serif;
+  font-size: 14px;
+  background: #14171c;
+  color: #e6e9ef;
+}
+header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 16px; background: #1c2027; border-bottom: 1px solid #2b313b;
+}
+h1 { font-size: 16px; margin: 0; }
+h2 { font-size: 14px; margin: 0 0 8px; color: #9aa4b2; }
+section { padding: 12px 16px; border-bottom: 1px solid #2b313b; }
+.badge {
+  padding: 2px 8px; border-radius: 10px; font-size: 12px;
+  background: #2b313b; color: #9aa4b2;
+}
+.badge.ok { background: #14432a; color: #7ee2a8; }
+.badge.ng { background: #4a1d1d; color: #ff9c9c; }
+#nodes { display: flex; flex-wrap: wrap; gap: 12px; }
+.node {
+  flex: 1 1 340px; min-width: 320px;
+  background: #1c2027; border: 1px solid #2b313b; border-radius: 6px; padding: 12px;
+}
+.node h3 { margin: 0 0 8px; font-size: 14px; }
+.kv { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; }
+.kv dt { color: #9aa4b2; }
+.kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.bits { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+.bit {
+  font-size: 11px; padding: 2px 6px; border-radius: 3px;
+  background: #23282f; color: #6b7480; border: 1px solid #2b313b;
+}
+.bit.on { background: #14432a; color: #7ee2a8; border-color: #1d6b41; }
+.bit.fault.on { background: #4a1d1d; color: #ff9c9c; border-color: #7a2f2f; }
+.alarm { margin-top: 8px; font-size: 12px; }
+.alarm.active { color: #ff9c9c; }
+canvas { width: 100%; height: 120px; background: #1c2027; border: 1px solid #2b313b; border-radius: 6px; }
+.chart { margin-bottom: 10px; }
+.chart-label { font-size: 12px; color: #9aa4b2; margin-bottom: 2px; }
+.toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
+.toolbar input { flex: 1; background: #1c2027; border: 1px solid #2b313b; color: #e6e9ef; padding: 4px 8px; border-radius: 4px; }
+.toolbar button { background: #2b313b; border: none; color: #e6e9ef; padding: 4px 12px; border-radius: 4px; cursor: pointer; }
+#canlog {
+  margin: 0; max-height: 260px; overflow-y: auto;
+  background: #10131a; border: 1px solid #2b313b; border-radius: 6px;
+  padding: 8px; font-size: 12px; line-height: 1.5; white-space: pre-wrap;
+}
