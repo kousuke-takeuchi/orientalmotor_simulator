@@ -99,6 +99,11 @@ class DriverModel(object):
             for i in range(4)
         ]
 
+        # 1005h COB-ID SYNC message。producer/consumer の詳細実装は Task 10。
+        self.sync_cob_id = 0x80
+        self.sync_producer_enabled = False
+        self.sync_period_us = 0
+
         # PDO マッピングパラメータ (1600h-1603h / 1A00h-1A03h)。既定値は EDS 実測。
         self.rpdo_mapping = [
             PdoMappingParams([MappingEntry(0x6040, 0, 16)]),
