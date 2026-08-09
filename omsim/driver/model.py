@@ -11,11 +11,12 @@ from omsim.driver.errors import (
 )
 from omsim.driver.motor_plant import MotorPlant
 from omsim.driver.objects import ObjectRouter
+from omsim.driver.operation import OperationContext, ProfileVelocityMode
 from omsim.driver.profile import TrapezoidProfile
 from omsim.driver.state_machine import Cia402StateMachine, State
 from omsim.driver.units import UnitConverter
 
-MODE_PV = 3
+MODE_PV = ProfileVelocityMode.MODE_CODE
 MODE_PP = 1
 MODE_TQ = 4
 MODE_HM = 6
@@ -50,6 +51,7 @@ class DriverModel(object):
         self.alarms = AlarmModel()
 
         self.mode = MODE_PV
+        self.operation = ProfileVelocityMode()
         self.target_velocity_rpm = 0.0
         self.profile_acceleration_rpm_s = 1000.0
         self.profile_deceleration_rpm_s = 1000.0
@@ -85,6 +87,15 @@ class DriverModel(object):
         """[(index, sub, 理由), ...] 未実装スタブオブジェクトの一覧。"""
         return self.router.stubs()
 
+    def _context(self):
+        return OperationContext(
+            state_machine=self.state_machine,
+            profile=self.profile,
+            plant=self.plant,
+            units=self.units,
+            params=self,
+        )
+
     def step(self, dt):
         self.sim_time += dt
 
@@ -92,35 +103,17 @@ class DriverModel(object):
             self.state_machine.set_fault(True)
         self.state_machine.step(dt)
 
-        excited = self._sync_excited()
+        self._sync_excited()
 
-        self.profile.acceleration = self.units.rpm_to_internal(
-            self.profile_acceleration_rpm_s)
-        self.profile.deceleration = self.units.rpm_to_internal(
-            self.profile_deceleration_rpm_s)
+        ctx = self._context()
+        self.operation.step(dt, ctx)
 
-        if excited:
-            self.profile.set_target(self.units.rpm_to_internal(self.target_velocity_rpm))
-        else:
-            self.profile.set_target(0.0)
-            if self.state_machine.state in (State.FAULT, State.SWITCH_ON_DISABLED):
-                self.profile.reset(0.0)
+        if not self.state_machine.is_operation_enabled and self.state_machine.state in (
+            State.FAULT, State.SWITCH_ON_DISABLED
+        ):
+            self.profile.reset(0.0)
 
-        self.profile.step(dt)
-        self.plant.step(dt, self.profile.command)
-
-        error_rpm = abs(self.actual_velocity_rpm - self.command_velocity_rpm)
-        self.state_machine.target_reached = (
-            excited and self.profile.at_target and error_rpm <= self.velocity_window_rpm
-        )
-
-        # HP-5143E 7.2.4 (p39): pv モードでの Statusword bit12 (SPD) は
-        # 「速度が 0 かどうか」= 実速度の絶対値が Velocity threshold (606Fh)
-        # 以下かどうか。
-        if self.mode == MODE_PV:
-            self.state_machine.operation_mode_specific_12 = (
-                abs(self.actual_velocity_rpm) <= self.velocity_threshold_rpm
-            )
+        self.operation.apply_status_bits(ctx)
 
         # HP-5143E 6.2 (p35) Transition 12: quick-stop-active はクイック
         # ストップの減速完了 (指令・実速度ともに 0 付近) で switch-on-disabled
@@ -227,6 +220,7 @@ class DriverModel(object):
                 ABORT_DEVICE_STATE,
                 "運転モード {} は未実装 (P4 で実装予定, 6060h)".format(mode))
         self.mode = mode
+        self.operation = ProfileVelocityMode()
 
     @router.reader(0x6061)
     def _read_mode_display(self, sub):
