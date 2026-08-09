@@ -5,6 +5,9 @@ ABORT_NOT_READABLE = 0x06010001
 ABORT_NOT_WRITABLE = 0x06010002
 ABORT_VALUE_RANGE = 0x06090030
 ABORT_DEVICE_STATE = 0x08000022
+# CiA301: 「アプリケーションにデータが無い」。1003h のまだ記録されていない
+# sub-index を読んだ場合など。
+ABORT_NO_DATA = 0x08000024
 
 
 class ObjectAccessError(Exception):

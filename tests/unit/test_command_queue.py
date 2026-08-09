@@ -16,14 +16,26 @@ def test_put_does_not_apply_immediately():
     assert queue.pending_count() == 1
 
 
-def test_drain_applies_in_order():
+def test_same_key_keeps_only_the_last_value():
     queue = CommandQueue()
     model = DriverModel(node_id=1)
     queue.put(0x6083, 0, 100)
     queue.put(0x6083, 0, 200)
+    assert queue.pending_count() == 1
     queue.drain(model)
     assert model.read_object(0x6083) == 200
     assert queue.pending_count() == 0
+
+
+def test_different_keys_are_both_applied():
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    queue.put(0x6083, 0, 300)
+    queue.put(0x6084, 0, 400)
+    assert queue.pending_count() == 2
+    queue.drain(model)
+    assert model.read_object(0x6083) == 300
+    assert model.read_object(0x6084) == 400
 
 
 def test_drain_on_empty_queue_is_a_no_op():
@@ -37,11 +49,13 @@ def test_drain_reports_errors_without_losing_later_commands():
     """不正な書き込みがあっても後続のコマンドは適用される。"""
     queue = CommandQueue()
     model = DriverModel(node_id=1)
+    # last-write-wins なので、同じキーだと後勝ちで 1 件に潰れてしまう。
+    # 「先の書込みが失敗しても後続が適用される」ことを見るため別キーにする。
     queue.put(0x6083, 0, 0)      # 0 は範囲外 (1 以上)
-    queue.put(0x6083, 0, 500)
+    queue.put(0x6084, 0, 500)
     errors = queue.drain(model)
     assert len(errors) == 1
-    assert model.read_object(0x6083) == 500
+    assert model.read_object(0x6084) == 500
 
 
 def test_is_safe_across_threads():
@@ -58,12 +72,120 @@ def test_is_safe_across_threads():
     for thread in threads:
         thread.join()
 
-    assert queue.pending_count() == 800
+    # 全スレッドが同じ (0x6083, 0) に書くため、last-write-wins で 1 件に収束する。
+    assert queue.pending_count() == 1
     queue.drain(model)
     assert queue.pending_count() == 0
+    assert 1 <= model.read_object(0x6083) <= 200
 
 
 def test_two_queues_are_independent():
     a, b = CommandQueue(), CommandQueue()
     a.put(0x6083, 0, 1)
     assert b.pending_count() == 0
+
+
+def test_maxlen_evicts_the_oldest_distinct_key():
+    queue = CommandQueue(maxlen=2)
+    model = DriverModel(node_id=1)
+    queue.put(0x6083, 0, 100)   # 1 件目
+    queue.put(0x6084, 0, 200)   # 2 件目、上限ちょうど
+    queue.put(0x605A, 0, 0)     # 3 件目、上限超過 -> 最古 (0x6083) を破棄
+    assert queue.pending_count() == 2
+    queue.drain(model)
+    # 0x6083 への書込みは破棄されたので既定値のまま
+    assert model.read_object(0x6083) == 1000
+    # 生き残った 2 件は適用される
+    assert model.read_object(0x6084) == 200
+    assert model.read_object(0x605A) == 0
+
+
+def test_maxlen_is_not_consumed_by_updates_to_the_same_key():
+    queue = CommandQueue(maxlen=2)
+    model = DriverModel(node_id=1)
+    queue.put(0x6083, 0, 100)
+    queue.put(0x6083, 0, 200)   # 同じキーの更新は新しい枠を消費しない
+    queue.put(0x6084, 0, 300)
+    assert queue.pending_count() == 2
+    queue.drain(model)
+    assert model.read_object(0x6083) == 200
+    assert model.read_object(0x6084) == 300
+
+
+def test_immediate_trigger_is_applied_every_drain():
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    queue.put(0x6083, 0, 500, trigger="immediate")
+    queue.drain(model, sync_received=False)
+    assert model.read_object(0x6083) == 500
+
+
+def test_sync_trigger_waits_for_sync_received():
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    queue.put(0x6083, 0, 600, trigger="sync")
+    queue.drain(model, sync_received=False)
+    assert model.read_object(0x6083) == 1000  # まだ既定値のまま
+    assert queue.pending_count() == 1
+
+    queue.drain(model, sync_received=True)
+    assert model.read_object(0x6083) == 600
+    assert queue.pending_count() == 0
+
+
+def test_sync_and_immediate_can_coexist_in_the_same_drain():
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    queue.put(0x6083, 0, 700, trigger="sync")
+    queue.put(0x6084, 0, 800, trigger="immediate")
+    queue.drain(model, sync_received=False)
+    assert model.read_object(0x6083) == 1000  # sync 待ち
+    assert model.read_object(0x6084) == 800   # immediate は即時反映
+    assert queue.pending_count() == 1
+
+
+def test_default_trigger_is_immediate():
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    queue.put(0x6083, 0, 900)  # trigger 省略
+    queue.drain(model)         # sync_received 省略
+    assert model.read_object(0x6083) == 900
+
+
+# --- 状態遷移コマンド (6040h Controlword) は潰してはいけない ---
+
+def test_controlword_transition_sequence_is_not_collapsed():
+    """CiA402 の起動シーケンス 6 -> 7 -> F は 1 制御周期に重なっても全部効く。
+
+    last-write-wins で最後の 0x000F だけを残すと、中間の遷移
+    (shutdown / switch on) が失われてノードが永久に起動しない。
+    実機のドライバは Controlword への書込みそのものを 1 回ずつ処理するため、
+    「コマンドレジスタ」は順序を保って全件適用する。
+    """
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    model.step(0.001)
+    for value in (0x0006, 0x0007, 0x000F):
+        queue.put(0x6040, 0, value)
+    assert queue.pending_count() == 3
+    queue.drain(model)
+    model.step(0.001)
+    assert model.state_machine.state == "operation-enabled"
+
+
+def test_repeated_identical_controlword_is_still_coalesced():
+    """同じ値の連投は遷移を生まないので 1 件に潰してよい (PDO の垂れ流し対策)。"""
+    queue = CommandQueue()
+    for _ in range(5):
+        queue.put(0x6040, 0, 0x000F)
+    assert queue.pending_count() == 1
+
+
+def test_non_command_objects_are_still_last_write_wins():
+    queue = CommandQueue()
+    model = DriverModel(node_id=1)
+    queue.put(0x60FF, 0, 100)
+    queue.put(0x60FF, 0, 200)
+    assert queue.pending_count() == 1
+    queue.drain(model)
+    assert model.read_object(0x60FF) == 200

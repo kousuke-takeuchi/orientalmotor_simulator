@@ -26,14 +26,29 @@ def test_raising_queues_an_emcy():
     assert model.pop_pending_emcy() is None
 
 
+def test_raising_appends_packed_cia301_value_to_history():
+    model = AlarmModel()
+    model.raise_alarm(alarm_code=0x30, emcy_code=0x2310)
+    # 下位16bit = EMCY code (0x2310)、上位16bit = メーカ固有 (0x30)
+    assert model.history[0] == (0x30 << 16) | 0x2310
+
+
 def test_raising_appends_to_history_newest_first():
     model = AlarmModel()
     model.raise_alarm(0x30, 0x2310)
     model.set_cause_cleared(True)
     model.reset()
     model.raise_alarm(0x31, 0x2311)
-    assert model.history[0] == 0x31
-    assert model.history[1] == 0x30
+    assert model.history[0] == (0x31 << 16) | 0x2311
+    assert model.history[1] == (0x30 << 16) | 0x2310
+
+
+def test_manufacturer_specific_code_with_zero_is_packed_as_zero_upper_bits():
+    """通信エラー系 (Heartbeat 断など) は EMCY code 自体がそのままの値で、
+    メーカ固有部分を持たない。上位16bit は 0 になる。"""
+    model = AlarmModel()
+    model.raise_alarm(alarm_code=0, emcy_code=0x8130)
+    assert model.history[0] == 0x8130
 
 
 def test_history_is_bounded():
@@ -81,8 +96,9 @@ def test_second_alarm_while_active_is_ignored():
     model = AlarmModel()
     model.raise_alarm(0x30, 0x2310)
     model.raise_alarm(0x31, 0x2311)
+    # active_alarm はメーカ固有コードのまま (Web 表示用)
     assert model.active_alarm == 0x30
-    assert model.history == [0x30]
+    assert model.history == [(0x30 << 16) | 0x2310]
 
 
 def test_clear_history_empties_the_list_but_keeps_active_alarm():

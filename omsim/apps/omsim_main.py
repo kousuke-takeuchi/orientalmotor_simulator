@@ -66,7 +66,7 @@ def parse_args(argv):
         default=None,
         help="指定するとブラウザ用の Web サーバをこのポートで起動する",
     )
-    parser.add_argument("--web-host", default="0.0.0.0")
+    parser.add_argument("--web-host", default="127.0.0.1")
     args = parser.parse_args(argv)
 
     eds_path = find_eds(args.eds)

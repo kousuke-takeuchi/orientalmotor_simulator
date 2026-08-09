@@ -112,12 +112,39 @@ VM 上で実行した場合、ブラウザで VM の IP（例: `http://192.168.3
 - **波形モニタ**: 速度・位置など時系列の値をグラフで表示。シナリオ実行中は波形がリアルタイムに動く
 - **CAN フレームログ**: バス上を流れる CAN フレームを時系列で表示
 
-**既知の制限**: omsim 自身が送信したフレームは CAN フレームログに出ません。
-`python-can` の `receive_own_messages` が既定で無効なため、自ノードの送信フレームは
-バス受信としてループバックされず、ログに現れないのが理由です（P2 では未対応。
-将来的には送信時に `recorder.frame("tx", ...)` を明示的に呼ぶ形での対応を想定）。
+CAN フレームログには、受信フレームだけでなく omsim 自身の送信フレーム
+（SDO レスポンス / boot-up / Heartbeat / EMCY / TPDO / SYNC / node guarding 応答）も
+`tx` として出ます。`python-can` の `receive_own_messages` は既定で無効ですが、
+送信経路（`network.bus.send`）を 1 箇所だけラップして記録しているためです（P3 で対応）。
 
-`--web-host` でバインドアドレスを指定できます（既定はすべてのインタフェースで待ち受け）。
+`--web-host` でバインドアドレスを指定できます。既定は `127.0.0.1`（ローカルのみ）なので、
+VM の外のブラウザから開く場合は明示的に `--web-host 0.0.0.0` を指定してください。
+
+## PDO / SYNC / エラー制御（P3）
+
+- **PDO**: RPDO 4 本（`1400h`-`1403h` 通信パラメータ / `1600h`-`1603h` マッピング）と
+  TPDO 4 本（`1800h`-`1803h` / `1A00h`-`1A03h`）。マッピングは動的に変更できます。
+  変更手順は仕様どおり「PDO を bit31=1 で無効化 → マッピング sub0 を 0 → sub1-4 を書換
+  → sub0 に個数 → PDO を bit31=0 で再有効化」です。
+  transmission type は RPDO が `00h`/`FEh`/`FFh`、TPDO が `00h`（変化時に次の SYNC で送信）/
+  `01h`-`F0h`（n 回目の SYNC ごと）/`FCh`/`FDh`/`FEh`/`FFh`（inhibit time・event timer 駆動）。
+  予約値（`F1h`-`FBh`）への変更は SDO abort `06090030h` で拒否します。
+- **SYNC**: `1005h` の bit30 を立てると omsim 自身が SYNC producer になります。
+  周期は `1006h`（μs 単位、0-1,000,000）。bit30 を立てなければ consumer としてのみ動作します。
+- **Heartbeat consumer**: `1016h` sub1 に `(node_id<<16)|time_ms` を書くと、そのノードの
+  Heartbeat が時間内に来なければ EMCY `8130h`（node guarding / heartbeat error）を発行します。
+- **node guarding**: `100Ch`（guard time, ms）/`100Dh`（life time factor）の値を保持し、
+  `700h+NodeID` への RTR に `(toggle<<7)|NMT状態コード` の 1 バイトで応答します。
+  生死判定そのものは NMT マスタの責務のため omsim 側では行いません。
+- **1003h**: CiA301 の Pre-defined error field 形式（下位 16bit = EMCY コード、
+  上位 16bit = メーカ固有コード）。まだ記録の無い sub を読むと abort `08000024h` を返します。
+
+**既知の制限**
+
+- PDO マッピングはバイト境界のみ対応（ビット単位のサブバイトパッキングは対象外）。
+  EDS の既定マッピングが全てバイト境界のため、この範囲で十分と判断しています。
+- SYNC 受信の検出粒度はシミュレーションステップと同じ 1ms。1ms 未満に複数届いた SYNC は 1 回として扱います。
+- PDO パラメータの NMT 状態によるアクセス制御は行いません（Pre-operational で設定する運用前提）。
 
 ## 網羅率の確認
 

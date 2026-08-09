@@ -5,8 +5,10 @@ import logging
 from omsim.driver.model import DriverModel
 from omsim.node.eds import load_eds
 from omsim.node.od_bridge import boot_local_node, build_local_node
+from omsim.node.realtime_bridge import RealtimeBridge
 from omsim.sim.clock import SimClock
 from omsim.sim.command_queue import CommandQueue
+from omsim.sim.sync_counter import SyncCounter
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,9 @@ class NodeManager(object):
         self.models = {}
         self.nodes = {}
         self.queues = {}
+        self.eds = {}
+        self.sync_counters = {}
+        self.bridge = RealtimeBridge()
         self._started = False
         for spec in specs:
             od = load_eds(spec.eds)
@@ -28,6 +33,8 @@ class NodeManager(object):
             queue = CommandQueue()
             self.models[spec.node_id] = model
             self.queues[spec.node_id] = queue
+            self.eds[spec.node_id] = od
+            self.sync_counters[spec.node_id] = SyncCounter()
             self.nodes[spec.node_id] = build_local_node(
                 spec.node_id, od, model, queue=queue)
 
@@ -39,6 +46,9 @@ class NodeManager(object):
             # 実機と同様、初期化後は自律的に boot-up を送出し PRE-OPERATIONAL へ
             # 遷移する。起動処理自体はノード個別の責務のため od_bridge 側に置く。
             boot_local_node(node)
+            self.bridge.attach(
+                node, self.models[node.id], self.eds[node.id],
+                self.queues[node.id], self.sync_counters[node.id])
         self._started = True
 
     def stop(self):
@@ -51,13 +61,21 @@ class NodeManager(object):
     def step(self):
         dt = self.clock.advance()
         for node_id, model in self.models.items():
-            for item, err in self.queues[node_id].drain(model):
+            sync_received = self.sync_counters[node_id].take() > 0
+            for item, err in self.queues[node_id].drain(
+                    model, sync_received=sync_received):
                 logger.warning(
                     "node%d: %04Xh:%02X への書込み %s が拒否されました: %s",
                     node_id, item.index, item.sub, item.value, err,
                 )
             model.step(dt)
             self._drain_emcy(node_id, model)
+            if self.network is not None and self._started:
+                od = self.eds[node_id]
+                if sync_received:
+                    self.bridge.on_sync(
+                        node_id, model, self.network, od, self.clock.now)
+                self.bridge.step(node_id, model, self.network, od, self.clock.now)
 
     def _drain_emcy(self, node_id, model):
         """AlarmModel に溜まった EMCY をバスへ送出する。

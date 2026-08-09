@@ -89,7 +89,7 @@ def create_app(hub):
     return app
 
 
-def run_web(hub, host="0.0.0.0", port=8080):
+def run_web(hub, host="127.0.0.1", port=8080):
     """uvicorn をバックグラウンドスレッドで起動し (server, thread) を返す。"""
     import uvicorn
 

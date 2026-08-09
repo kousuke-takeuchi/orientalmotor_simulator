@@ -8,6 +8,8 @@ import collections
 ALARM_OVERLOAD = 0x30
 EMCY_OVERLOAD = 0x2310
 EMCY_ERROR_RESET = 0x0000
+# HP-5143E 4.5 (p23): Node guarding error or heartbeat error
+EMCY_HEARTBEAT_ERROR = 0x8130
 
 
 class AlarmModel(object):
@@ -37,7 +39,11 @@ class AlarmModel(object):
         self.error_code = emcy_code
         self.error_register = error_register
         self._cause_cleared = False
-        self._history.appendleft(alarm_code)
+        # CiA301 Pre-defined error field: 下位16bit = EMCY error code、
+        # 上位16bit = メーカ固有情報。1003h に積むのはこの形式であって、
+        # メーカ固有アラームコードそのものではない (P2 最終レビュー指摘)。
+        packed = (emcy_code & 0xFFFF) | ((alarm_code & 0xFFFF) << 16)
+        self._history.appendleft(packed)
         self._pending_emcy.append((emcy_code, error_register))
 
     def reset(self):

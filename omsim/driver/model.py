@@ -4,9 +4,10 @@
 """
 import copy
 
-from omsim.driver.alarm_model import AlarmModel
+from omsim.driver.alarm_model import EMCY_HEARTBEAT_ERROR, AlarmModel
 from omsim.driver.errors import (
     ABORT_DEVICE_STATE,
+    ABORT_NO_DATA,
     ABORT_VALUE_RANGE,
     NotImplementedObjectError,
     ObjectAccessError,
@@ -14,6 +15,17 @@ from omsim.driver.errors import (
 from omsim.driver.motor_plant import MotorPlant
 from omsim.driver.objects import ObjectRouter
 from omsim.driver.operation import OperationContext, ProfileVelocityMode
+from omsim.driver.pdo import (
+    RPDO_BASE_COB_ID,
+    RPDO_TRANSMISSION_TYPES,
+    TPDO_BASE_COB_ID,
+    MappingEntry,
+    PdoCommParams,
+    PdoMappingParams,
+    is_supported_tpdo_transmission_type,
+    pack_mapping_entry,
+    unpack_mapping_entry,
+)
 from omsim.driver.profile import TrapezoidProfile
 from omsim.driver.state_machine import Cia402StateMachine, State
 from omsim.driver.units import UnitConverter
@@ -74,6 +86,48 @@ class DriverModel(object):
         # 挙動には反映しない（常に既定の「減速完了で switch-on-disabled」）。
         self.quick_stop_option_code = 2
 
+        # PDO 通信パラメータ (1400h-1403h / 1800h-1803h)。既定値は EDS 実測。
+        self.rpdo_comm = [
+            PdoCommParams(cob_id=RPDO_BASE_COB_ID[i] + node_id, valid=True,
+                          rtr_allowed=True, transmission_type=255)
+            for i in range(4)
+        ]
+        self.tpdo_comm = [
+            PdoCommParams(cob_id=TPDO_BASE_COB_ID[i] + node_id, valid=True,
+                          rtr_allowed=False,
+                          transmission_type=(255 if i < 2 else 1),
+                          inhibit_time_100us=50, event_timer_ms=0)
+            for i in range(4)
+        ]
+
+        # node guarding (100Ch/100Dh)。生死判定は NMT master 側の責務のため
+        # (4.2.1 実測)、スレーブ側は値の保持と RTR 応答のみ行う。
+        self.guard_time_ms = 0
+        self.life_time_factor = 0
+        # Heartbeat consumer (1016h sub1)
+        self.heartbeat_consumer_node_id = 0
+        self.heartbeat_consumer_time_ms = 0
+        self._heartbeat_consumer_reference_time = None
+
+        # 1005h COB-ID SYNC message。producer/consumer の詳細実装は Task 10。
+        self.sync_cob_id = 0x80
+        self.sync_producer_enabled = False
+        self.sync_period_us = 0
+
+        # PDO マッピングパラメータ (1600h-1603h / 1A00h-1A03h)。既定値は EDS 実測。
+        self.rpdo_mapping = [
+            PdoMappingParams([MappingEntry(0x6040, 0, 16)]),
+            PdoMappingParams([MappingEntry(0x6040, 0, 16), MappingEntry(0x6060, 0, 8)]),
+            PdoMappingParams([MappingEntry(0x6040, 0, 16), MappingEntry(0x607A, 0, 32)]),
+            PdoMappingParams([MappingEntry(0x6040, 0, 16), MappingEntry(0x60FF, 0, 32)]),
+        ]
+        self.tpdo_mapping = [
+            PdoMappingParams([MappingEntry(0x6041, 0, 16)]),
+            PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x6061, 0, 8)]),
+            PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x6064, 0, 32)]),
+            PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x606C, 0, 32)]),
+        ]
+
         # passthrough で書かれた値。インスタンスごとに独立。
         self.passthrough_values = {}
 
@@ -85,6 +139,31 @@ class DriverModel(object):
     def write_object(self, index, sub=0, value=0):
         self.router.write(self, index, sub, value)
 
+    # validate_object の使い捨てコピーで deepcopy する対象。
+    # writer が実際に変更しうる入れ子オブジェクト/コンテナのみを列挙する。
+    # 新しい writer が別の入れ子オブジェクトを触るようになったら追記すること
+    # (test_shadow_isolation_holds_for_every_registered_writer が検出する)。
+    _SHADOW_DEEP_ATTRS = (
+        "state_machine", "plant", "alarms", "passthrough_values",
+        "rpdo_comm", "rpdo_mapping", "tpdo_comm", "tpdo_mapping",
+    )
+
+    def _shadow(self):
+        """validate_object 用の使い捨てコピーを作る。
+
+        copy.deepcopy(self) は state_machine/plant/profile/units/operation/
+        alarms など全ての入れ子オブジェクトを再帰的に複製するため、PDO の
+        書込み頻度では重すぎる (P2 最終レビュー指摘)。writer が実際に
+        変更するのは _SHADOW_DEEP_ATTRS のものだけで、profile・units・
+        operation は writer から直接変更されない (target_velocity_rpm 等は
+        DriverModel 自身のスカラー属性であり、shallow copy で自動的に
+        独立になる)。そのため shallow copy + 上記だけを個別に deepcopy する。
+        """
+        shadow = copy.copy(self)
+        for name in self._SHADOW_DEEP_ATTRS:
+            setattr(shadow, name, copy.deepcopy(getattr(self, name)))
+        return shadow
+
     def validate_object(self, index, sub=0, value=0):
         """index:sub に value を書き込めるかどうかだけを判定する（実体は書き換えない）。
 
@@ -92,7 +171,7 @@ class DriverModel(object):
         abort 応答を正しく返せるようにするための窓口。writer ハンドラの中
         には 40C0h のアラームリセットのように副作用を伴うものがあるため、
         「検証専用のロジックを別に書く」のではなく、writer ハンドラ自体を
-        self の使い捨てディープコピー上で実際に走らせ、例外が出るかどうかで
+        使い捨てコピー (_shadow()) 上で実際に走らせ、例外が出るかどうかで
         判定する。これなら検証ロジックと適用ロジックが二重に書かれてずれる
         ことがない。コピー側に生じた副作用はコピーごと捨てるため、呼び出し
         元の状態には一切影響しない。
@@ -100,8 +179,7 @@ class DriverModel(object):
         受け付けられない場合は ObjectAccessError（NotImplementedObjectError
         を含む）を投げる。
         """
-        shadow = copy.deepcopy(self)
-        self.router.write(shadow, index, sub, value)
+        self.router.write(self._shadow(), index, sub, value)
 
     def stub_objects(self):
         """[(index, sub, 理由), ...] 未実装スタブオブジェクトの一覧。"""
@@ -145,6 +223,8 @@ class DriverModel(object):
             )
             if stopped:
                 self.state_machine.stop_completed()
+
+        self._check_heartbeat_consumer()
 
     def _sync_excited(self):
         """励磁状態 (plant.excited) をステートマシンの現在の状態から同期する。
@@ -203,6 +283,34 @@ class DriverModel(object):
     @router.reader(0x1001)
     def _read_error_register(self, sub):
         return self.alarms.error_register
+
+    # --- SYNC (1005h / 1006h) ---
+
+    _SYNC_PRODUCER_BIT = 1 << 30
+
+    @router.reader(0x1005)
+    def _read_sync_cob_id(self, sub):
+        value = self.sync_cob_id & 0x7FF
+        if self.sync_producer_enabled:
+            value |= self._SYNC_PRODUCER_BIT
+        return value
+
+    @router.writer(0x1005)
+    def _write_sync_cob_id(self, sub, value):
+        raw = int(value) & 0xFFFFFFFF
+        self.sync_cob_id = raw & 0x7FF
+        self.sync_producer_enabled = bool(raw & self._SYNC_PRODUCER_BIT)
+
+    @router.reader(0x1006)
+    def _read_sync_period(self, sub):
+        return self.sync_period_us
+
+    @router.writer(0x1006)
+    def _write_sync_period(self, sub, value):
+        period = int(value)
+        if not (0 <= period <= 1000000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "1006h は 0-1,000,000 μs")
+        self.sync_period_us = period
 
     @router.reader(0x1008)
     def _read_device_name(self, sub):
@@ -319,7 +427,9 @@ class DriverModel(object):
     def _read_error_field(self, sub):
         history = self.alarms.history
         if sub < 1 or sub > len(history):
-            return 0
+            # CiA301 では「データが無い」ことは 0 ではなく abort で表す。
+            raise ObjectAccessError(
+                ABORT_NO_DATA, "1003h:{:02X} はまだ記録がありません".format(sub))
         return history[sub - 1]
 
     # sub1〜10 は全て同じ「履歴の sub 番目を返す」処理のため、
@@ -357,13 +467,66 @@ class DriverModel(object):
             raise ObjectAccessError(ABORT_VALUE_RANGE, "6081h は 0 以上")
         self.profile_velocity_rpm = int(value)
 
-    @router.reader(0x1016, 1, stub="P3: Heartbeat consumer 未実装。値の保持のみ")
+    @router.reader(0x1016, 1)
     def _read_consumer_heartbeat_time(self, sub):
         return self.consumer_heartbeat_config
 
-    @router.writer(0x1016, 1, stub="P3: Heartbeat consumer 未実装。値の保持のみ")
+    @router.writer(0x1016, 1)
     def _write_consumer_heartbeat_time(self, sub, value):
-        self.consumer_heartbeat_config = int(value) & 0xFFFFFFFF
+        raw = int(value) & 0xFFFFFFFF
+        self.consumer_heartbeat_config = raw
+        self.heartbeat_consumer_node_id = (raw >> 16) & 0xFF
+        self.heartbeat_consumer_time_ms = raw & 0xFFFF
+        enabled = bool(
+            self.heartbeat_consumer_node_id and self.heartbeat_consumer_time_ms)
+        self._heartbeat_consumer_reference_time = self.sim_time if enabled else None
+
+    # --- node guarding (100Ch/100Dh) と Heartbeat consumer の判定 ---
+
+    def _check_heartbeat_consumer(self):
+        if not self.heartbeat_consumer_node_id or not self.heartbeat_consumer_time_ms:
+            return
+        if self._heartbeat_consumer_reference_time is None:
+            return
+        elapsed_ms = (self.sim_time - self._heartbeat_consumer_reference_time) * 1000.0
+        if elapsed_ms > self.heartbeat_consumer_time_ms:
+            self.alarms.raise_alarm(
+                alarm_code=0, emcy_code=EMCY_HEARTBEAT_ERROR, error_register=0x11)
+
+    def on_heartbeat_received(self, node_id, sim_time):
+        """監視対象ノードからの Heartbeat/boot-up 受信を伝える。
+
+        node/realtime_bridge.py から呼ばれる (driver 層に can 依存を
+        持ち込まないための窓口)。
+        """
+        if node_id != self.heartbeat_consumer_node_id:
+            return
+        self._heartbeat_consumer_reference_time = sim_time
+        if self.alarms.is_active and self.alarms.error_code == EMCY_HEARTBEAT_ERROR:
+            self.alarms.set_cause_cleared(True)
+            self.alarms.reset()
+
+    @router.reader(0x100C)
+    def _read_guard_time(self, sub):
+        return self.guard_time_ms
+
+    @router.writer(0x100C)
+    def _write_guard_time(self, sub, value):
+        time_ms = int(value)
+        if not (0 <= time_ms <= 65535):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "100Ch は 0-65535")
+        self.guard_time_ms = time_ms
+
+    @router.reader(0x100D)
+    def _read_life_time_factor(self, sub):
+        return self.life_time_factor
+
+    @router.writer(0x100D)
+    def _write_life_time_factor(self, sub, value):
+        factor = int(value)
+        if not (0 <= factor <= 255):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "100Dh は 0-255")
+        self.life_time_factor = factor
 
     @router.reader(0x1017)
     def _read_producer_heartbeat_time(self, sub):
@@ -479,6 +642,208 @@ class DriverModel(object):
         "何も伝わらない。配線 (reset 受信時に DriverModel を初期化し直す) "
         "は P3 で実施予定"
     )
+
+    # --- PDO 通信パラメータ (1400h-1403h / 1800h-1803h) ---
+
+    def _write_pdo_comm_cob_id(self, params_list, slot, value, allow_rtr_bit):
+        raw = int(value) & 0xFFFFFFFF
+        decoded = PdoCommParams.decode_cob_id_sub1(raw)
+        if not allow_rtr_bit and not decoded["rtr_allowed"]:
+            # RPDO の COB-ID には RTR ビットの意味が無い (常に ZERO 領域)。
+            # 立てて書かれても無視して常に許可扱いにする (実害が無いため
+            # abort まではしない)。
+            decoded["rtr_allowed"] = True
+        params_list[slot].cob_id = decoded["cob_id"]
+        params_list[slot].rtr_allowed = decoded["rtr_allowed"]
+        params_list[slot].valid = decoded["valid"]
+
+    def _write_transmission_type(self, params_list, slot, value, allowed_check):
+        value = int(value)
+        if not allowed_check(value):
+            raise ObjectAccessError(
+                0x06090030, "{:02X}h は未対応の transmission type です".format(value))
+        params_list[slot].transmission_type = value
+
+    # RPDO 通信パラメータ (1400h-1403h)
+    for _slot, _index in enumerate((0x1400, 0x1401, 0x1402, 0x1403)):
+        def _make_rpdo_comm_handlers(slot=_slot, index=_index):
+            # ループ変数はキーワード引数の既定値で捕捉する。自由変数のまま
+            # 参照すると del 後に全スロットが最後の値を見る (Python の罠)。
+            def read_highest(self, sub):
+                return 2
+
+            def read_cob_id(self, sub):
+                return self.rpdo_comm[slot].encode_cob_id_sub1()
+
+            def write_cob_id(self, sub, value):
+                self._write_pdo_comm_cob_id(
+                    self.rpdo_comm, slot, value, allow_rtr_bit=False)
+
+            def read_tt(self, sub):
+                return self.rpdo_comm[slot].transmission_type
+
+            def write_tt(self, sub, value):
+                self._write_transmission_type(
+                    self.rpdo_comm, slot, value,
+                    lambda v: v in RPDO_TRANSMISSION_TYPES)
+
+            return read_highest, read_cob_id, write_cob_id, read_tt, write_tt
+
+        _read_highest, _read_cob_id, _write_cob_id, _read_tt, _write_tt = (
+            _make_rpdo_comm_handlers())
+        router.reader(_index, 0)(_read_highest)
+        router.reader(_index, 1)(_read_cob_id)
+        router.writer(_index, 1)(_write_cob_id)
+        router.reader(_index, 2)(_read_tt)
+        router.writer(_index, 2)(_write_tt)
+    del _slot, _index
+
+    # TPDO 通信パラメータ (1800h-1803h)
+    for _slot, _index in enumerate((0x1800, 0x1801, 0x1802, 0x1803)):
+        def _make_tpdo_comm_handlers(slot=_slot, index=_index):
+            def read_highest(self, sub):
+                return 5
+
+            def read_cob_id(self, sub):
+                return self.tpdo_comm[slot].encode_cob_id_sub1()
+
+            def write_cob_id(self, sub, value):
+                self._write_pdo_comm_cob_id(
+                    self.tpdo_comm, slot, value, allow_rtr_bit=True)
+
+            def read_tt(self, sub):
+                return self.tpdo_comm[slot].transmission_type
+
+            def write_tt(self, sub, value):
+                self._write_transmission_type(
+                    self.tpdo_comm, slot, value, is_supported_tpdo_transmission_type)
+
+            def read_inhibit(self, sub):
+                return self.tpdo_comm[slot].inhibit_time_100us
+
+            def write_inhibit(self, sub, value):
+                self.tpdo_comm[slot].inhibit_time_100us = int(value) & 0xFFFF
+
+            def read_event(self, sub):
+                return self.tpdo_comm[slot].event_timer_ms
+
+            def write_event(self, sub, value):
+                self.tpdo_comm[slot].event_timer_ms = int(value) & 0xFFFF
+
+            return (read_highest, read_cob_id, write_cob_id, read_tt, write_tt,
+                    read_inhibit, write_inhibit, read_event, write_event)
+
+        (_read_highest, _read_cob_id, _write_cob_id, _read_tt, _write_tt,
+         _read_inhibit, _write_inhibit, _read_event, _write_event) = (
+            _make_tpdo_comm_handlers())
+        router.reader(_index, 0)(_read_highest)
+        router.reader(_index, 1)(_read_cob_id)
+        router.writer(_index, 1)(_write_cob_id)
+        router.reader(_index, 2)(_read_tt)
+        router.writer(_index, 2)(_write_tt)
+        router.reader(_index, 3)(_read_inhibit)
+        router.writer(_index, 3)(_write_inhibit)
+        router.reader(_index, 5)(_read_event)
+        router.writer(_index, 5)(_write_event)
+    del _slot, _index
+
+    # --- PDO マッピングパラメータ (1600h-1603h / 1A00h-1A03h) ---
+
+    def _mapping_disabled_guard(self, comm_params):
+        if comm_params.valid:
+            raise ObjectAccessError(
+                ABORT_DEVICE_STATE,
+                "対応する PDO が有効 (bit31=0) な間はマッピングを変更できません")
+
+    def _write_mapping_count(self, mapping_params, comm_params, value):
+        self._mapping_disabled_guard(comm_params)
+        count = int(value)
+        if not (0 <= count <= PdoMappingParams.MAX_ENTRIES):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "マッピング数は 0-4")
+        if count == 0:
+            mapping_params.entries = []
+            return
+        if count > len(mapping_params.entries):
+            raise ObjectAccessError(
+                ABORT_DEVICE_STATE,
+                "sub{} まで書き込んでから sub0 を {} にしてください".format(count, count))
+        mapping_params.entries = mapping_params.entries[:count]
+
+    def _write_mapping_entry(self, mapping_params, comm_params, sub, value):
+        self._mapping_disabled_guard(comm_params)
+        entry = unpack_mapping_entry(int(value) & 0xFFFFFFFF)
+        if entry.length_bits % 8 != 0:
+            raise ObjectAccessError(
+                ABORT_VALUE_RANGE,
+                "{}bit はバイト境界に揃っていません (このフェーズはバイト単位のみ対応)"
+                .format(entry.length_bits))
+        while len(mapping_params.entries) < sub:
+            mapping_params.entries.append(MappingEntry(0, 0, 0))
+        mapping_params.entries[sub - 1] = entry
+
+    # RPDO マッピングパラメータ (1600h-1603h)
+    for _slot, _index in enumerate((0x1600, 0x1601, 0x1602, 0x1603)):
+        def _make_rpdo_mapping_handlers(slot=_slot):
+            def read_count(self, sub):
+                return self.rpdo_mapping[slot].count
+
+            def write_count(self, sub, value):
+                self._write_mapping_count(
+                    self.rpdo_mapping[slot], self.rpdo_comm[slot], value)
+
+            def read_entry(self, sub):
+                entries = self.rpdo_mapping[slot].entries
+                if sub > len(entries):
+                    return 0
+                e = entries[sub - 1]
+                return pack_mapping_entry(e.index, e.sub, e.length_bits)
+
+            def write_entry(self, sub, value):
+                self._write_mapping_entry(
+                    self.rpdo_mapping[slot], self.rpdo_comm[slot], sub, value)
+
+            return read_count, write_count, read_entry, write_entry
+
+        _read_count, _write_count, _read_entry, _write_entry = (
+            _make_rpdo_mapping_handlers())
+        router.reader(_index, 0)(_read_count)
+        router.writer(_index, 0)(_write_count)
+        for _sub in (1, 2, 3, 4):
+            router.reader(_index, _sub)(_read_entry)
+            router.writer(_index, _sub)(_write_entry)
+    del _slot, _index, _sub
+
+    # TPDO マッピングパラメータ (1A00h-1A03h)
+    for _slot, _index in enumerate((0x1A00, 0x1A01, 0x1A02, 0x1A03)):
+        def _make_tpdo_mapping_handlers(slot=_slot):
+            def read_count(self, sub):
+                return self.tpdo_mapping[slot].count
+
+            def write_count(self, sub, value):
+                self._write_mapping_count(
+                    self.tpdo_mapping[slot], self.tpdo_comm[slot], value)
+
+            def read_entry(self, sub):
+                entries = self.tpdo_mapping[slot].entries
+                if sub > len(entries):
+                    return 0
+                e = entries[sub - 1]
+                return pack_mapping_entry(e.index, e.sub, e.length_bits)
+
+            def write_entry(self, sub, value):
+                self._write_mapping_entry(
+                    self.tpdo_mapping[slot], self.tpdo_comm[slot], sub, value)
+
+            return read_count, write_count, read_entry, write_entry
+
+        _read_count, _write_count, _read_entry, _write_entry = (
+            _make_tpdo_mapping_handlers())
+        router.reader(_index, 0)(_read_count)
+        router.writer(_index, 0)(_write_count)
+        for _sub in (1, 2, 3, 4):
+            router.reader(_index, _sub)(_read_entry)
+            router.writer(_index, _sub)(_write_entry)
+    del _slot, _index, _sub
 
     # --- .mxex に保存される純パラメータ群 ---
     # 値を保持して読み返せるが、挙動には効かない。実装フェーズは各行のとおり。

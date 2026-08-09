@@ -2,6 +2,7 @@
 import collections
 import json
 import logging
+import threading
 
 import can
 
@@ -14,6 +15,7 @@ class Recorder(object):
     def __init__(self, path, buffer_size=2000):
         self._handle = open(path, "w", encoding="utf-8") if path else None
         self._buffer = collections.deque(maxlen=buffer_size)
+        self._lock = threading.Lock()
 
     def frame(self, direction, can_id, data, sim_time):
         record = {
@@ -24,7 +26,8 @@ class Recorder(object):
             "data": bytes(data).hex(),
             "text": describe_frame(can_id, data),
         }
-        self._buffer.append(record)
+        with self._lock:
+            self._buffer.append(record)
         self._write(record)
 
     def state(self, snapshot):
@@ -32,7 +35,8 @@ class Recorder(object):
         self._write(record)
 
     def recent_frames(self, limit=100):
-        items = list(self._buffer)
+        with self._lock:
+            items = list(self._buffer)
         return items[-limit:]
 
     def close(self):
@@ -79,4 +83,29 @@ def attach_recorder(network, recorder, clock):
         # python-can 4.5.0 の Notifier は __init__ で listeners のコピーを取るため、
         # connect() 後に network.listeners へ append しただけでは効かない。
         notifier.add_listener(listener)
+    _wrap_bus_send_for_tx_logging(network, recorder, clock)
     return listener
+
+
+def _wrap_bus_send_for_tx_logging(network, recorder, clock):
+    """自ノードの送信フレームも CAN ログに載せる。
+
+    SocketCAN は receive_own_messages が既定 False のため、Notifier
+    (受信側) には自分の送信が返ってこない。SDO 応答・boot-up・
+    Heartbeat・EMCY、そして P3 で追加する PDO・SYNC・node guarding
+    応答は全て最終的に network.bus.send() を通るため、送信元コードを
+    個別に触らず、この 1 箇所をラップするだけで将来の送信経路追加にも
+    自動的に追従する。
+    """
+    bus = getattr(network, "bus", None)
+    if bus is None or getattr(bus, "_omsim_tx_wrapped", False):
+        return
+    original_send = bus.send
+
+    def send_and_record(msg, *args, **kwargs):
+        original_send(msg, *args, **kwargs)
+        if not getattr(msg, "is_remote_frame", False):
+            recorder.frame("tx", msg.arbitration_id, bytes(msg.data), clock.now)
+
+    bus.send = send_and_record
+    bus._omsim_tx_wrapped = True

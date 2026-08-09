@@ -86,7 +86,8 @@ def test_list_stubs_prints_stub_lines_and_exits_without_opening_network(capsys):
     assert (0x409B, 0) in printed_keys
     assert (0x6081, 0) in printed_keys
     assert (0x60FE, 1) in printed_keys
-    assert (0x1016, 1) in printed_keys
+    # 1016h は P3 で実働になったため、スタブ一覧には出ない。
+    assert (0x1016, 1) not in printed_keys
 
 
 def test_web_port_defaults_to_disabled():
@@ -97,5 +98,5 @@ def test_web_port_is_parsed():
     assert parse_args(["--web-port", "8080"]).web_port == 8080
 
 
-def test_web_host_defaults_to_all_interfaces():
-    assert parse_args([]).web_host == "0.0.0.0"
+def test_web_host_defaults_to_localhost():
+    assert parse_args([]).web_host == "127.0.0.1"

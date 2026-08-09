@@ -6,7 +6,7 @@ supply current), 6081h (Profile velocity), 1016h:01 (Consumer heartbeat time)。
 """
 import pytest
 
-from omsim.driver.errors import ABORT_VALUE_RANGE, ObjectAccessError
+from omsim.driver.errors import ABORT_NO_DATA, ABORT_VALUE_RANGE, ObjectAccessError
 from omsim.driver.model import DriverModel
 
 
@@ -142,9 +142,12 @@ def test_error_field_sub0_counts_history_and_subs_return_history():
     model = make_model()
     model.inject_alarm(0x30, 0x2310)
     assert model.read_object(0x1003, 0) == 1
-    assert model.read_object(0x1003, 1) == 0x30
-    # まだ発生していない sub は 0 を返す。
-    assert model.read_object(0x1003, 2) == 0
+    # CiA301 Pre-defined error field 形式 (下位16bit=EMCY、上位16bit=メーカ固有)
+    assert model.read_object(0x1003, 1) == (0x30 << 16) | 0x2310
+    # まだ記録の無い sub は abort する (0 を返さない)。
+    with pytest.raises(ObjectAccessError) as exc:
+        model.read_object(0x1003, 2)
+    assert exc.value.abort_code == ABORT_NO_DATA
 
 
 def test_error_field_sub0_write_zero_clears_history():
@@ -153,7 +156,8 @@ def test_error_field_sub0_write_zero_clears_history():
     assert model.read_object(0x1003, 0) == 1
     model.write_object(0x1003, 0, 0)
     assert model.read_object(0x1003, 0) == 0
-    assert model.read_object(0x1003, 1) == 0
+    with pytest.raises(ObjectAccessError):
+        model.read_object(0x1003, 1)
 
 
 def test_error_field_sub0_rejects_nonzero_write():
@@ -195,7 +199,8 @@ def test_two_instances_do_not_share_p1_object_state():
 def test_stub_objects_lists_the_four_unimplemented_objects():
     stubs = make_model().stub_objects()
     stub_keys = set((index, sub) for index, sub, _reason in stubs)
-    assert (0x1016, 1) in stub_keys
+    # 1016h (Heartbeat consumer) は P3 で実働になったのでスタブではない。
+    assert (0x1016, 1) not in stub_keys
     assert (0x409B, 0) in stub_keys
     assert (0x60FE, 1) in stub_keys
     assert (0x6081, 0) in stub_keys
