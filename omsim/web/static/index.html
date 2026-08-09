@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>omsim モニタ</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>omsim モニタ</h1>
+      <span id="conn" class="badge">未接続</span>
+      <span id="simtime" class="badge">t = 0.000 s</span>
+    </header>
+
+    <section id="pane-status">
+      <h2>ステータスモニタ</h2>
+      <div id="nodes"></div>
+    </section>
+
+    <section id="pane-waveform">
+      <h2>波形モニタ</h2>
+      <div id="charts"></div>
+    </section>
+
+    <section id="pane-canlog">
+      <h2>CAN フレームログ</h2>
+      <div class="toolbar">
+        <input id="filter" type="text" placeholder="フィルタ (例: SDO, 6041, node1)" />
+        <button id="pause">停止</button>
+      </div>
+      <p class="note">
+        SocketCAN の receive_own_messages が既定で無効のため、omsim 自身が送信した
+        フレーム (SDO レスポンス / boot-up / EMCY) は表示されません。受信フレームのみです。
+      </p>
+      <pre id="canlog"></pre>
+    </section>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

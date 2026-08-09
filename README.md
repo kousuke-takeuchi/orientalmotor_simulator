@@ -19,7 +19,7 @@ vagrant ssh -c "bash /home/vagrant/KEISUU/omsim/scripts/vagrant_provision.sh"
 
 `scripts/vagrant_provision.sh` が行うこと:
 - `python3-pip` / `can-utils` の apt インストール
-- `requirements.txt` からの依存導入（`canopen` / `python-can` / `pytest` / `PyYAML`）
+- `requirements.txt` からの依存導入（`canopen` / `python-can` / `pytest` / `PyYAML` / `fastapi` / `uvicorn` / `httpx` / `websockets`）
 - `pip install --user -e .` による omsim 本体の editable インストール
 - `omsim-vcan.service` の systemd 登録・有効化（VM 再起動後も `vcan0` を自動復旧）
 - 検証用の `ip -o link show vcan0` / `python3 -m pytest --version` / `python3 -c "import omsim..."` 出力
@@ -86,7 +86,58 @@ cd /c/Users/ktake/code/pitakuru_ws/src
 vagrant ssh-config > /c/Users/ktake/code/keisuu/oriental_motor_simulator/.vm-ssh-config
 ```
 
-期待結果: `75 passed`（SKIP 0 件。`vcan0` が上がっているので integration テストも実行される）
+期待結果: `264 passed`（SKIP 0 件。`vcan0` が上がっているので integration テストも実行される）
+
+**既知の flaky テスト**: `tests/integration/` 配下の vcan 経由 SDO テスト（例:
+`test_scenario_run.py::test_smoke_scenario_all_steps_pass`、
+`test_sdo_over_vcan.py::test_reads_device_name_over_vcan`）は、稀に
+`SdoCommunicationError: Unexpected response 0x41` で落ちることがある。
+3 回連続実行したところ、落ちるテストがそのたびに変わり（毎回同じテストではない）、
+再実行すると通ることを確認済み。vcan0 のタイミング起因の不安定さであり、
+シミュレータ本体の不具合ではないと考えられる。落ちた場合は再実行すること。
+
+## Web モニタ
+
+`--web-port` を付けて起動すると、シミュレーション状態をブラウザからリアルタイムに確認できます。
+（設計書 4.1 の通り、Web は無くてもシミュレーションは完全に動きます。`--web-port` を付けない限り
+Web サーバは一切起動しません＝ヘッドレス実行そのままです。）
+
+```bash
+python3 -m omsim.apps.omsim_main --node 1 --node 2 --web-port 8080
+```
+
+VM 上で実行した場合、ブラウザで VM の IP（例: `http://192.168.33.10:8080/`）を開くと 3 ペインが表示されます。
+
+- **ステータスモニタ**: 各ノードの状態（NMT ステート、Statusword、動作モード等）を一覧表示
+- **波形モニタ**: 速度・位置など時系列の値をグラフで表示。シナリオ実行中は波形がリアルタイムに動く
+- **CAN フレームログ**: バス上を流れる CAN フレームを時系列で表示
+
+**既知の制限**: omsim 自身が送信したフレームは CAN フレームログに出ません。
+`python-can` の `receive_own_messages` が既定で無効なため、自ノードの送信フレームは
+バス受信としてループバックされず、ログに現れないのが理由です（P2 では未対応。
+将来的には送信時に `recorder.frame("tx", ...)` を明示的に呼ぶ形での対応を想定）。
+
+`--web-host` でバインドアドレスを指定できます（既定はすべてのインタフェースで待ち受け）。
+
+## 網羅率の確認
+
+EDS（オブジェクト辞書）に定義されたオブジェクトのうち、どこまで実装済みかを確認できます。
+
+```bash
+python3 -m omsim.apps.omsim_main --coverage
+```
+
+実装済み・値の保持のみ・未実装の件数と、未実装オブジェクトの一覧（インデックス:サブインデックス）が出力されます。
+
+## 未実装スタブの確認
+
+「値の保持のみ」など、部分的にしか実装されていないオブジェクトの一覧と、その理由・対応予定フェーズを確認できます。
+
+```bash
+python3 -m omsim.apps.omsim_main --list-stubs
+```
+
+各行はオブジェクトのインデックス:サブインデックスと、対応予定フェーズ（P3 以降）を含む説明です。
 
 ## シナリオ実行
 

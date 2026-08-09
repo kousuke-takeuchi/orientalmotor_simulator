@@ -1,10 +1,14 @@
 """複数ノードを 1 プロセスで同時に進める。"""
 import collections
+import logging
 
 from omsim.driver.model import DriverModel
 from omsim.node.eds import load_eds
 from omsim.node.od_bridge import boot_local_node, build_local_node
 from omsim.sim.clock import SimClock
+from omsim.sim.command_queue import CommandQueue
+
+logger = logging.getLogger(__name__)
 
 NodeSpec = collections.namedtuple("NodeSpec", ["node_id", "eds", "mxex"])
 NodeSpec.__new__.__defaults__ = (None,)
@@ -16,12 +20,16 @@ class NodeManager(object):
         self.network = network
         self.models = {}
         self.nodes = {}
+        self.queues = {}
         self._started = False
         for spec in specs:
             od = load_eds(spec.eds)
             model = DriverModel(node_id=spec.node_id)
+            queue = CommandQueue()
             self.models[spec.node_id] = model
-            self.nodes[spec.node_id] = build_local_node(spec.node_id, od, model)
+            self.queues[spec.node_id] = queue
+            self.nodes[spec.node_id] = build_local_node(
+                spec.node_id, od, model, queue=queue)
 
     def start(self):
         if self.network is None or self._started:
@@ -43,6 +51,11 @@ class NodeManager(object):
     def step(self):
         dt = self.clock.advance()
         for node_id, model in self.models.items():
+            for item, err in self.queues[node_id].drain(model):
+                logger.warning(
+                    "node%d: %04Xh:%02X への書込み %s が拒否されました: %s",
+                    node_id, item.index, item.sub, item.value, err,
+                )
             model.step(dt)
             self._drain_emcy(node_id, model)
 

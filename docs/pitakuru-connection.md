@@ -346,7 +346,35 @@ statusword 読み取りと `60FF`（Target velocity）の書き込みが独立�
    これが HWTO（動力遮断）や励磁 OFF と対応するのであれば、P5 の
    HWTO 実装時に意味付けを検討する。
 
-## 8. コミット
+## 9. P2 Task 2 追記: 未登録オブジェクトの abort 化で判明した内部依存
+
+P2 Task 2（2026-08-09）で `ObjectRouter.read` の仕様を「未登録なら `None` を
+返して EDS 既定値にフォールスルー」から「未登録なら SDO abort
+（`ABORT_NOT_IN_OD = 0x06020000`）」に変更した。この変更後に
+`python3 -m pytest -q` を実行したところ、pitakuru の `motor_control_node`
+が読み書きするオブジェクト（本ドキュメント 7 節の一覧）自体は全て
+既に登録済みで新規の abort は発生しなかったが、**pitakuru 由来ではなく
+`python-canopen` ライブラリ自身が起動シーケンス内部で読む
+`1017h`（Producer heartbeat time）が未登録だったため、全ノードの起動
+（`NmtSlave.send_command(0x80)` 内の `sdo[0x1017].raw` 読み取り）が
+abort で失敗するリグレッションが実測で判明した**（`tests/integration/`
+配下の vcan 系テストが軒並み ERROR になった）。
+
+- 原因: `1017h` は本ドキュメント 4 節までに列挙した「pitakuru が SDO で
+  触るオブジェクト」には含まれない（7 節に記載の通り「pc_node＝LocalNode
+  宛のため CAN には出ない」）。しかし `canopen.NmtSlave` が内部的に
+  `LocalNode` の read コールバック経由でこの値を読むため、未登録だと
+  ノードの起動そのものが成立しなくなる。
+- 対処: `1016h:01`（Consumer heartbeat time、既存実装）と同じパターンで
+  `omsim/driver/model.py` に `1017h`（sub なし）のリーダ/ライタを追加し、
+  値の保持のみ（Heartbeat producer 自体の実配信は P3 で未実装のまま）と
+  して登録した。EDS 上の `DefaultValue=0` と同じ `0` を初期値にしている。
+- 影響範囲: `omsim --coverage` の「値の保持のみ」カウントには含めず、
+  `stubs()` 一覧（`--list-stubs`）には `0x1017:00` として載る。
+
+対処後、`python3 -m pytest -q` は 218 件全て passed（0 failed / 0 error）。
+
+## 10. コミット（P2 Task 2 分は別コミット。上記は P1 時点の記録）
 
 ```
 git add docs/pitakuru-connection.md scripts/run_with_pitakuru.sh \

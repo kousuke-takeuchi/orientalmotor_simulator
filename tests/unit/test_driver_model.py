@@ -1,6 +1,10 @@
 import pytest
 
-from omsim.driver.errors import ABORT_NOT_WRITABLE, ObjectAccessError
+from omsim.driver.errors import (
+    ABORT_NOT_IN_OD,
+    ABORT_NOT_WRITABLE,
+    ObjectAccessError,
+)
 from omsim.driver.model import DriverModel
 
 
@@ -19,8 +23,14 @@ def test_device_name_is_not_writable():
     assert exc.value.abort_code == ABORT_NOT_WRITABLE
 
 
-def test_unhandled_object_reads_as_none():
-    assert DriverModel(node_id=1).read_object(0x1018, 1) is None
+def test_unhandled_object_read_aborts_as_not_in_od():
+    # 1018h:01 (Identity object, Vendor ID) は router に未登録。従来は
+    # 黙って None を返し EDS の既定値へフォールスルーしていたが、
+    # それは「実機と違う値が返るのに気付けない」P2 で塞いだ穴のため、
+    # 未登録オブジェクトは abort するのが仕様になった。
+    with pytest.raises(ObjectAccessError) as exc:
+        DriverModel(node_id=1).read_object(0x1018, 1)
+    assert exc.value.abort_code == ABORT_NOT_IN_OD
 
 
 def test_step_accumulates_sim_time():

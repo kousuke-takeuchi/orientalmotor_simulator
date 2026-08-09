@@ -1,5 +1,6 @@
 """設計書 8.1 の複数ノード独立性の検証。"""
 import os
+import time
 
 import canopen
 import pytest
@@ -25,6 +26,40 @@ def _enable(model, target_rpm):
     model.write_object(0x6040, 0, 0x0007)
     model.write_object(0x6040, 0, 0x000F)
     model.write_object(0x60FF, 0, target_rpm)
+
+
+def _wait_for_sdo_values(remotes, expected_values, timeout=2.0, interval=0.1):
+    """
+    SDO値が期待値になるまでリトライ（CAN経由書込みのキュー反映待機用）。
+
+    Args:
+        remotes: {node_id: RemoteNode} のdict
+        expected_values: {node_id: expected_value} のdict
+        timeout: 最大待ち時間（秒）
+        interval: リトライ間隔（秒）
+
+    Raises:
+        AssertionError: タイムアウト時に実際の値を含むメッセージで失敗
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        all_match = True
+        for node_id, expected in expected_values.items():
+            actual = remotes[node_id].sdo[0x6083].raw
+            if actual != expected:
+                all_match = False
+                break
+        if all_match:
+            return
+        time.sleep(interval)
+
+    # タイムアウト時は実際の値を含むメッセージで失敗
+    actual_values = {node_id: remotes[node_id].sdo[0x6083].raw
+                     for node_id in expected_values}
+    raise AssertionError(
+        u"SDO値が期待値になりません (timeout=%.1fs): 期待値=%s, 実際=%s"
+        % (timeout, expected_values, actual_values)
+    )
 
 
 def test_scenario_two_nodes_reach_different_speeds(running_sim, master):
@@ -103,6 +138,12 @@ def test_sdo_requests_to_both_nodes_are_not_confused(running_sim, master):
 
     remotes[1].sdo[0x6083].raw = 1234
     remotes[2].sdo[0x6083].raw = 4321
+
+    # CAN経由SDO書込みはコマンドキュー経由のため、次のstep()で反映される。
+    # キュー反映を待つ。
+    _wait_for_sdo_values(remotes, {1: 1234, 2: 4321})
+
+    # その後、20回読んでも取り違えない（2台のSDOが混ざらないことの検証）。
     for _ in range(20):
         assert remotes[1].sdo[0x6083].raw == 1234
         assert remotes[2].sdo[0x6083].raw == 4321

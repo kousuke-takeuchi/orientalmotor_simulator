@@ -2,6 +2,8 @@
 
 参照: HP-5143E 7.2 Profile Velocity Mode (p37)、HP-5141J 第1章 (p12-48)
 """
+import copy
+
 from omsim.driver.alarm_model import AlarmModel
 from omsim.driver.errors import (
     ABORT_DEVICE_STATE,
@@ -11,11 +13,12 @@ from omsim.driver.errors import (
 )
 from omsim.driver.motor_plant import MotorPlant
 from omsim.driver.objects import ObjectRouter
+from omsim.driver.operation import OperationContext, ProfileVelocityMode
 from omsim.driver.profile import TrapezoidProfile
 from omsim.driver.state_machine import Cia402StateMachine, State
 from omsim.driver.units import UnitConverter
 
-MODE_PV = 3
+MODE_PV = ProfileVelocityMode.MODE_CODE
 MODE_PP = 1
 MODE_TQ = 4
 MODE_HM = 6
@@ -50,6 +53,7 @@ class DriverModel(object):
         self.alarms = AlarmModel()
 
         self.mode = MODE_PV
+        self.operation = ProfileVelocityMode()
         self.target_velocity_rpm = 0.0
         self.profile_acceleration_rpm_s = 1000.0
         self.profile_deceleration_rpm_s = 1000.0
@@ -65,9 +69,13 @@ class DriverModel(object):
         self.digital_outputs = 0
         self.profile_velocity_rpm = 1
         self.consumer_heartbeat_config = 0
+        self.producer_heartbeat_config = 0
         # 605Ah Quick stop option code: 未実装 (P5)。値は保持するのみで、
         # 挙動には反映しない（常に既定の「減速完了で switch-on-disabled」）。
         self.quick_stop_option_code = 2
+
+        # passthrough で書かれた値。インスタンスごとに独立。
+        self.passthrough_values = {}
 
     # --- 外向きの窓口は以下の 4 つだけ ---
 
@@ -77,9 +85,36 @@ class DriverModel(object):
     def write_object(self, index, sub=0, value=0):
         self.router.write(self, index, sub, value)
 
+    def validate_object(self, index, sub=0, value=0):
+        """index:sub に value を書き込めるかどうかだけを判定する（実体は書き換えない）。
+
+        CAN 受信スレッド (od_bridge.on_write) が、キューに積む前に SDO の
+        abort 応答を正しく返せるようにするための窓口。writer ハンドラの中
+        には 40C0h のアラームリセットのように副作用を伴うものがあるため、
+        「検証専用のロジックを別に書く」のではなく、writer ハンドラ自体を
+        self の使い捨てディープコピー上で実際に走らせ、例外が出るかどうかで
+        判定する。これなら検証ロジックと適用ロジックが二重に書かれてずれる
+        ことがない。コピー側に生じた副作用はコピーごと捨てるため、呼び出し
+        元の状態には一切影響しない。
+
+        受け付けられない場合は ObjectAccessError（NotImplementedObjectError
+        を含む）を投げる。
+        """
+        shadow = copy.deepcopy(self)
+        self.router.write(shadow, index, sub, value)
+
     def stub_objects(self):
         """[(index, sub, 理由), ...] 未実装スタブオブジェクトの一覧。"""
         return self.router.stubs()
+
+    def _context(self):
+        return OperationContext(
+            state_machine=self.state_machine,
+            profile=self.profile,
+            plant=self.plant,
+            units=self.units,
+            params=self,
+        )
 
     def step(self, dt):
         self.sim_time += dt
@@ -88,35 +123,16 @@ class DriverModel(object):
             self.state_machine.set_fault(True)
         self.state_machine.step(dt)
 
-        excited = self._sync_excited()
+        self._sync_excited()
 
-        self.profile.acceleration = self.units.rpm_to_internal(
-            self.profile_acceleration_rpm_s)
-        self.profile.deceleration = self.units.rpm_to_internal(
-            self.profile_deceleration_rpm_s)
+        if not self.state_machine.is_operation_enabled and self.state_machine.state in (
+            State.FAULT, State.SWITCH_ON_DISABLED
+        ):
+            self.profile.reset(0.0)
 
-        if excited:
-            self.profile.set_target(self.units.rpm_to_internal(self.target_velocity_rpm))
-        else:
-            self.profile.set_target(0.0)
-            if self.state_machine.state in (State.FAULT, State.SWITCH_ON_DISABLED):
-                self.profile.reset(0.0)
-
-        self.profile.step(dt)
-        self.plant.step(dt, self.profile.command)
-
-        error_rpm = abs(self.actual_velocity_rpm - self.command_velocity_rpm)
-        self.state_machine.target_reached = (
-            excited and self.profile.at_target and error_rpm <= self.velocity_window_rpm
-        )
-
-        # HP-5143E 7.2.4 (p39): pv モードでの Statusword bit12 (SPD) は
-        # 「速度が 0 かどうか」= 実速度の絶対値が Velocity threshold (606Fh)
-        # 以下かどうか。
-        if self.mode == MODE_PV:
-            self.state_machine.operation_mode_specific_12 = (
-                abs(self.actual_velocity_rpm) <= self.velocity_threshold_rpm
-            )
+        ctx = self._context()
+        self.operation.step(dt, ctx)
+        self.operation.apply_status_bits(ctx)
 
         # HP-5143E 6.2 (p35) Transition 12: quick-stop-active はクイック
         # ストップの減速完了 (指令・実速度ともに 0 付近) で switch-on-disabled
@@ -223,6 +239,7 @@ class DriverModel(object):
                 ABORT_DEVICE_STATE,
                 "運転モード {} は未実装 (P4 で実装予定, 6060h)".format(mode))
         self.mode = mode
+        self.operation = ProfileVelocityMode()
 
     @router.reader(0x6061)
     def _read_mode_display(self, sub):
@@ -348,6 +365,23 @@ class DriverModel(object):
     def _write_consumer_heartbeat_time(self, sub, value):
         self.consumer_heartbeat_config = int(value) & 0xFFFFFFFF
 
+    @router.reader(0x1017)
+    def _read_producer_heartbeat_time(self, sub):
+        # Heartbeat producer は canopen.LocalNode.__init__() が
+        # self.add_write_callback(self.nmt.on_write) を無条件に登録して
+        # おり、NmtSlave が 1017h への書き込みをフックして
+        # network.send_periodic() で周期送信を開始するため、実装済み。
+        # ただし DriverModel 側には配線されていない（ドライバの状態には
+        # 影響しない）。値の保持と CANopen への受け渡しのみ行う。
+        # controller の実測確認: 1017h=200 で CAN ID 701 に 200ms 周期
+        # でハートビートフレーム (701 [1] 7F) が出現。
+        return self.producer_heartbeat_config
+
+    @router.writer(0x1017)
+    def _write_producer_heartbeat_time(self, sub, value):
+        # 上記の通り canopen.NmtSlave がフックして周期送信を管理する。
+        self.producer_heartbeat_config = int(value) & 0xFFFF
+
     @router.reader(0x6083)
     def _read_profile_acceleration(self, sub):
         return int(self.profile_acceleration_rpm_s)
@@ -445,3 +479,24 @@ class DriverModel(object):
         "何も伝わらない。配線 (reset 受信時に DriverModel を初期化し直す) "
         "は P3 で実施予定"
     )
+
+    # --- .mxex に保存される純パラメータ群 ---
+    # 値を保持して読み返せるが、挙動には効かない。実装フェーズは各行のとおり。
+    # netid == index - 0x4000 で mxex と対応する (設計書 2.3)。
+    _PASSTHROUGH_PARAMETERS = (
+        (0x4148, "P5: 絶対座標未設定時の絶対位置決め許可。値の保持のみ"),
+        (0x414B, "P5: ATL 機能モード設定。値の保持のみ"),
+        (0x415F, "P5: JOG/HOME トルク制限値。値の保持のみ"),
+        (0x4160, "P5: (HOME) 原点復帰モード。値の保持のみ"),
+        (0x4163, "P5: (HOME) 起動速度。値の保持のみ"),
+        (0x4169, "P5: (HOME) 2 センサ原点復帰の戻りステップ数。値の保持のみ"),
+        (0x4186, "P6: アラーム発生時の停止タイムアウト。値の保持のみ"),
+        (0x41A4, "P5: モーター回転方向。値の保持のみ"),
+        (0x41CA, "P5: WRAP 設定。値の保持のみ"),
+        (0x4735, "P4: カスタム停止レート。値の保持のみ"),
+        (0x4736, "P4: カスタム停止時間。値の保持のみ"),
+    )
+
+    for _index, _reason in _PASSTHROUGH_PARAMETERS:
+        router.passthrough(_index, 0, _reason)
+    del _index, _reason
