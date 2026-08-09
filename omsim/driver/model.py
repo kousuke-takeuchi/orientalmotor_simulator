@@ -227,6 +227,12 @@ class DriverModel(object):
             PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x606C, 0, 32)]),
         ]
 
+        # 稼働時間・走行距離のモニタ (40A1h/40A9h/407Eh/407Fh/407Ah)
+        self.total_uptime_seconds = 0.0
+        self.continuous_uptime_seconds = 0.0
+        self.odometer_revolutions = 0.0
+        self.tripmeter_revolutions = [0.0, 0.0]
+
         # 1010h で保存したパラメータ (実機の不揮発メモリ相当)
         self._saved_parameters = {}
 
@@ -345,6 +351,7 @@ class DriverModel(object):
             if stopped and not action.stay_in_state:
                 self.state_machine.stop_completed()
 
+        self._accumulate_monitors(dt)
         self._check_heartbeat_consumer()
         self._apply_travel_limits()
 
@@ -912,6 +919,162 @@ class DriverModel(object):
             self.plant.preset_position(window[1])
         elif position < window[0]:
             self.plant.preset_position(window[0])
+
+    # --- モニタ (404Bh-4050h / 4073h / 4075h / 406Bh-4078h / 407Ah-40A9h) ---
+
+    def _accumulate_monitors(self, dt):
+        self.total_uptime_seconds += dt
+        self.continuous_uptime_seconds += dt
+        revolutions = (
+            abs(self.plant.velocity) * dt / self.units.increments_per_shaft_rev)
+        self.odometer_revolutions += revolutions
+        self.tripmeter_revolutions[0] += revolutions
+        self.tripmeter_revolutions[1] += revolutions
+
+    @router.reader(0x404B)
+    def _read_user_target_position(self, sub):
+        return _clamp_int32(self.target_position)
+
+    @router.reader(0x404C)
+    def _read_user_demand_position(self, sub):
+        # 指令位置。位置ループの指令値を別に持っていないので実位置と同じ
+        # (pv では指令位置という概念が無い。pp/hm でも台形位置決めの目標は
+        # 内部状態なので、外向きには実位置を返す)。
+        return _clamp_int32(self.plant.position)
+
+    @router.reader(0x404D)
+    def _read_user_actual_position(self, sub):
+        return _clamp_int32(self.plant.position)
+
+    @router.reader(0x404E)
+    def _read_user_target_velocity(self, sub):
+        return int(round(self.target_velocity_rpm))
+
+    @router.reader(0x404F)
+    def _read_user_demand_velocity(self, sub):
+        return int(round(self.command_velocity_rpm))
+
+    @router.reader(0x4050)
+    def _read_user_actual_velocity(self, sub):
+        return int(round(self.actual_velocity_rpm))
+
+    @router.reader(0x4073)
+    def _read_position_deviation(self, sub):
+        return 0
+
+    @router.reader(0x4075)
+    def _read_speed_deviation(self, sub):
+        return int(round(self.command_velocity_rpm - self.actual_velocity_rpm))
+
+    @router.reader(0x406B)
+    def _read_torque_monitor(self, sub):
+        return _clamp_int32(round(self.plant.torque_permille))
+
+    @router.reader(0x406C)
+    def _read_load_factor(self, sub):
+        return _clamp_int32(round(abs(self.plant.torque_permille)))
+
+    @router.reader(0x4078)
+    def _read_overload_factor(self, sub):
+        if not self.max_torque_permille:
+            return 0
+        ratio = abs(self.plant.torque_permille) / float(self.max_torque_permille)
+        return int(round(ratio * 100))
+
+    @router.reader(0x40A1)
+    def _read_total_uptime(self, sub):
+        return int(self.total_uptime_seconds)
+
+    @router.reader(0x40A9)
+    def _read_continuous_uptime(self, sub):
+        return int(self.continuous_uptime_seconds)
+
+    @router.reader(0x407E)
+    def _read_odometer(self, sub):
+        return int(self.odometer_revolutions)
+
+    @router.reader(0x407F)
+    def _read_tripmeter0(self, sub):
+        return int(self.tripmeter_revolutions[0])
+
+    @router.reader(0x407A)
+    def _read_tripmeter1(self, sub):
+        return int(self.tripmeter_revolutions[1])
+
+    _UNMODELLED_MONITOR_STUB = (
+        "P7: 物理量のモデルが無い (電圧/温度/電力量)。読み出せるが常に 0 を返すだけ"
+    )
+
+    @router.reader(0x407C, stub=_UNMODELLED_MONITOR_STUB)
+    def _read_driver_temperature(self, sub):
+        return 0
+
+    @router.reader(0x407D, stub=_UNMODELLED_MONITOR_STUB)
+    def _read_motor_temperature(self, sub):
+        return 0
+
+    @router.reader(0x40A3, stub=_UNMODELLED_MONITOR_STUB)
+    def _read_inverter_voltage(self, sub):
+        return 0
+
+    @router.reader(0x40A4, stub=_UNMODELLED_MONITOR_STUB)
+    def _read_main_power_voltage(self, sub):
+        return 0
+
+    @router.reader(0x409C, stub=_UNMODELLED_MONITOR_STUB)
+    def _read_power_consumption(self, sub):
+        return 0
+
+    # --- メンテナンスコマンド ---
+
+    def _is_execute(self, value):
+        """実行トリガ。1 以上で実行、0 は何もしない (40C0h と同じ形)。"""
+        return int(value) != 0
+
+    @router.reader(0x40C2)
+    def _read_clear_alarm_history(self, sub):
+        return 0
+
+    @router.writer(0x40C2)
+    def _write_clear_alarm_history(self, sub, value):
+        if self._is_execute(value):
+            self.alarms.clear_history()
+
+    @router.reader(0x40C5)
+    def _read_p_preset(self, sub):
+        return 0
+
+    @router.writer(0x40C5)
+    def _write_p_preset(self, sub, value):
+        # P-PRESET: 現在位置を原点 (607Ch のオフセット) にする
+        if self._is_execute(value):
+            self.plant.preset_position(int(self.home_offset))
+
+    @router.reader(0x40D6)
+    def _read_clear_user_energy(self, sub):
+        return 0
+
+    @router.writer(0x40D6, stub=_UNMODELLED_MONITOR_STUB)
+    def _write_clear_user_energy(self, sub, value):
+        return
+
+    @router.reader(0x40D7)
+    def _read_clear_tripmeter0(self, sub):
+        return 0
+
+    @router.writer(0x40D7)
+    def _write_clear_tripmeter0(self, sub, value):
+        if self._is_execute(value):
+            self.tripmeter_revolutions[0] = 0.0
+
+    @router.reader(0x40D8)
+    def _read_clear_tripmeter1(self, sub):
+        return 0
+
+    @router.writer(0x40D8)
+    def _write_clear_tripmeter1(self, sub, value):
+        if self._is_execute(value):
+            self.tripmeter_revolutions[1] = 0.0
 
     # --- パラメータの保存 / 既定値復帰 (1010h / 1011h) ---
 
