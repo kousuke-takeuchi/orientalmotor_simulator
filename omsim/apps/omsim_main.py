@@ -19,23 +19,25 @@ def format_stubs(stubs):
     return lines
 
 
-def warn_ignored_mxex(nodes, stream=None):
-    """--node ID=MXEX で mxex が指定されたノードについて、まだ読み込まれない
-    ことを標準エラー出力に警告する。
+def load_node_mxex(manager, nodes, stream=None):
+    """--node ID=MXEX で指定された mxex を各ノードへ適用する (P5)。
 
-    mxex ローダは P5 で実装予定 (現状は NodeSpec.mxex に文字列を保持する
-    だけで、どこからも読まれない)。黙って無視すると「右/左で違う mxex を
-    渡したつもりが両ノード同一設定で動く」という気付きにくい事故になる。
+    適用できなかった件数は黙って捨てず必ず出す。「渡したつもりが効いて
+    いない」という気付きにくい事故を防ぐため。
     """
+    from omsim.apps.mxex import apply_mxex
+
     stream = sys.stderr if stream is None else stream
     for spec in nodes:
-        if spec.mxex:
-            print(
-                "警告: mxex の読み込みは P5 で実装予定のため、"
-                "node_id={} に指定された {} は無視されます".format(
-                    spec.node_id, spec.mxex),
-                file=stream,
-            )
+        if not spec.mxex:
+            continue
+        report = apply_mxex(manager.models[spec.node_id], spec.mxex)
+        print(
+            "mxex: node_id={} {} -> {} 件中 {} 件を適用 (未知 {} / 拒否 {})".format(
+                spec.node_id, spec.mxex, report["total"], report["applied"],
+                report["unknown"], report["rejected"]),
+            file=stream,
+        )
 
 
 def parse_args(argv):
@@ -69,6 +71,9 @@ def parse_args(argv):
         help="指定するとブラウザ用の Web サーバをこのポートで起動する",
     )
     parser.add_argument("--web-host", default="127.0.0.1")
+    parser.add_argument(
+        "--mxex-diff", nargs=2, metavar=("A", "B"), default=None,
+        help="2 つの .mxex を netid 単位で比較して終了する")
     parser.add_argument(
         "--wiring", default="standard", choices=sorted(WIRING_PRESETS),
         help="CN4 の HWTO 配線 (standard: 2重系 / pitakuru: 片系 / none: ジャンパ短絡)")
@@ -109,13 +114,19 @@ def main(argv=None):
         print(format_report(coverage_report(load_eds(args.eds), DriverModel.router)))
         return 0
 
-    warn_ignored_mxex(args.nodes)
+    if args.mxex_diff:
+        from omsim.apps.mxex import diff_mxex, format_diff
+
+        for line in format_diff(diff_mxex(*args.mxex_diff)):
+            print(line)
+        return 0
 
     recorder = Recorder(args.record)
     network = open_network(args.channel, args.interface, args.bitrate)
     manager = NodeManager(
         args.nodes, network=network, realtime=True,
         wiring=Cn4Wiring.preset(args.wiring))
+    load_node_mxex(manager, args.nodes)
     attach_recorder(network, recorder, manager.clock)
     manager.start()
 

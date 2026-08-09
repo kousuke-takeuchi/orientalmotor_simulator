@@ -1,6 +1,6 @@
 import pytest
 
-from omsim.apps.omsim_main import main, parse_args, warn_ignored_mxex
+from omsim.apps.omsim_main import load_node_mxex, main, parse_args
 from omsim.driver.model import DriverModel
 
 
@@ -50,22 +50,42 @@ def test_list_stubs_defaults_to_false():
     assert args.list_stubs is False
 
 
-def test_warn_ignored_mxex_warns_for_nodes_with_mxex(capsys):
-    args = parse_args(["--node", "2=/tmp/left.mxex", "--node", "1"])
-    warn_ignored_mxex(args.nodes)
+def test_load_node_mxex_applies_and_reports(capsys, tmp_path):
+    """P5 で mxex は実際に適用される。適用件数を必ず出す。"""
+    import io as _io
+
+    from omsim.driver.model import DriverModel
+
+    path = tmp_path / "right.mxex"
+    with _io.open(str(path), "w", encoding="utf-8") as out:
+        out.write('﻿<?xml version="1.0"?><FileDataTree><NetIds>'
+                  '<netid id="50" val="40"><att key="bank" val="1" /></netid>'
+                  "</NetIds></FileDataTree>")
+
+    class FakeManager(object):
+        def __init__(self):
+            self.models = {2: DriverModel(node_id=2)}
+
+    manager = FakeManager()
+    args = parse_args(["--node", "2={}".format(path), "--node", "1"])
+    load_node_mxex(manager, args.nodes)
     captured = capsys.readouterr()
-    assert "left.mxex" in captured.err
-    assert "P5" in captured.err
     assert "node_id=2" in captured.err
-    # mxex を指定していないノード (node_id=1) については警告しない。
+    assert "件を適用" in captured.err
+    # mxex を指定していないノード (node_id=1) については何も出さない。
     assert "node_id=1" not in captured.err
+    assert manager.models[2].read_object(0x4032) == 40
 
 
-def test_warn_ignored_mxex_is_silent_without_mxex(capsys):
+def test_load_node_mxex_is_silent_without_mxex(capsys):
     args = parse_args(["--node", "1", "--node", "2"])
-    warn_ignored_mxex(args.nodes)
+    load_node_mxex(None, args.nodes)
     captured = capsys.readouterr()
     assert captured.err == ""
+
+
+def test_mxex_diff_option_defaults_to_none():
+    assert parse_args([]).mxex_diff is None
 
 
 def test_list_stubs_prints_stub_lines_and_exits_without_opening_network(capsys):
