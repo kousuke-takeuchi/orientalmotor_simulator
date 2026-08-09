@@ -15,6 +15,14 @@ Scenario = collections.namedtuple("Scenario", ["name", "nodes", "steps"])
 StepResult = collections.namedtuple("StepResult", ["index", "kind", "ok", "detail"])
 
 STEP_KINDS = ("nmt", "sdo_write", "sdo_read", "expect", "wait", "pdo_send")
+
+# SDO ラウンドトリップのタイムアウト。CPU 競合下では無負荷 median 2.1ms に
+# 対し median 61.7ms / p90 862ms / max 2.79s まで伸びることが実測されて
+# おり、1.0 秒では CPU 競合下の CI 環境で flaky になる。以前はここと
+# tests/integration/test_sdo_over_vcan.py にリテラル 1.0 が二重に書かれて
+# いたのを、ここ 1 箇所に集約する（結合テスト側はこの定数を import する）。
+SDO_RESPONSE_TIMEOUT = 3.0
+
 NMT_COMMANDS = {
     "start": 0x01,
     "stop": 0x02,
@@ -60,7 +68,7 @@ def _remote_nodes(network, node_ids, eds):
     for node_id in node_ids:
         node = canopen.RemoteNode(node_id, eds)
         network.add_node(node)
-        node.sdo.RESPONSE_TIMEOUT = 1.0
+        node.sdo.RESPONSE_TIMEOUT = SDO_RESPONSE_TIMEOUT
         remotes[node_id] = node
     return remotes
 

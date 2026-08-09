@@ -16,7 +16,16 @@ def build_local_node(node_id, od, model, queue=None):
     def on_write(index, subindex, od, data):
         value = od.decode_raw(data)
         if queue is not None:
-            # 受信スレッドから直接 model を触らない。適用は step() の先頭。
+            # 検証はここ（CAN スレッド）で同期的に行い、SDO の abort 応答へ
+            # 正しく反映する。実際の適用（受信スレッドから直接 model を
+            # 触らない）だけを step() の先頭へ遅らせる。検証を素通りさせて
+            # 「成功」を返しキューに積み、後で黙って捨てる／warning ログに
+            # するのは、この設計の核心である「即座に落とす、黙って続行
+            # しない」に反する。
+            try:
+                model.validate_object(index, subindex, value)
+            except ObjectAccessError as err:
+                raise canopen.SdoAbortedError(err.abort_code)
             queue.put(index, subindex, value)
             return
         try:

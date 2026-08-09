@@ -2,6 +2,8 @@
 
 参照: HP-5143E 7.2 Profile Velocity Mode (p37)、HP-5141J 第1章 (p12-48)
 """
+import copy
+
 from omsim.driver.alarm_model import AlarmModel
 from omsim.driver.errors import (
     ABORT_DEVICE_STATE,
@@ -82,6 +84,24 @@ class DriverModel(object):
 
     def write_object(self, index, sub=0, value=0):
         self.router.write(self, index, sub, value)
+
+    def validate_object(self, index, sub=0, value=0):
+        """index:sub に value を書き込めるかどうかだけを判定する（実体は書き換えない）。
+
+        CAN 受信スレッド (od_bridge.on_write) が、キューに積む前に SDO の
+        abort 応答を正しく返せるようにするための窓口。writer ハンドラの中
+        には 40C0h のアラームリセットのように副作用を伴うものがあるため、
+        「検証専用のロジックを別に書く」のではなく、writer ハンドラ自体を
+        self の使い捨てディープコピー上で実際に走らせ、例外が出るかどうかで
+        判定する。これなら検証ロジックと適用ロジックが二重に書かれてずれる
+        ことがない。コピー側に生じた副作用はコピーごと捨てるため、呼び出し
+        元の状態には一切影響しない。
+
+        受け付けられない場合は ObjectAccessError（NotImplementedObjectError
+        を含む）を投げる。
+        """
+        shadow = copy.deepcopy(self)
+        self.router.write(shadow, index, sub, value)
 
     def stub_objects(self):
         """[(index, sub, 理由), ...] 未実装スタブオブジェクトの一覧。"""
