@@ -8,6 +8,7 @@ import pytest
 from omsim.apps.scenario import SDO_RESPONSE_TIMEOUT, load_scenario, run_scenario
 from omsim.driver.model import MODE_PV
 from omsim.node.eds import DEFAULT_EDS_PATH
+from omsim.sim.wiring import Cn4Wiring
 
 pytestmark = pytest.mark.vcan
 
@@ -92,7 +93,9 @@ def test_removing_excitation_on_one_node_does_not_affect_the_other(stepped_sim):
     _enable(two, 100)
     stepped_sim.run_for(2.0)
 
-    one.state_machine.voltage_enabled = False  # HWTO 相当。実装は P5
+    # node 1 の HWTO1 だけを落とす (この 1 台の安全リレーが切れた状態)。
+    # P3.5 で実装され、voltage_enabled を直接叩く必要が無くなった。
+    stepped_sim.set_node_wiring(1, Cn4Wiring(hwto1="open", hwto2="jumper"))
     stepped_sim.run_for(1.5)
 
     assert abs(one.read_object(0x606C)) <= 2

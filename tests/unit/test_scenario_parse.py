@@ -58,3 +58,26 @@ def test_sub_index_is_parsed_as_integer(tmp_path):
     assert step["sub"] == 1
     assert isinstance(step["sub"], int)
     assert step["value"] == 10
+
+
+def test_relay_step_is_parsed():
+    import io
+    import os
+    import tempfile
+
+    from omsim.apps.scenario import load_scenario
+
+    doc = "name: relay\nnodes: [1]\nsteps:\n  - relay: off\n  - relay: on\n"
+    handle, path = tempfile.mkstemp(suffix=".yaml")
+    os.close(handle)
+    try:
+        with io.open(path, "w", encoding="utf-8") as out:
+            out.write(doc)
+        scenario = load_scenario(path)
+    finally:
+        os.remove(path)
+
+    assert [s["kind"] for s in scenario.steps] == ["relay", "relay"]
+    # YAML の off/on は bool として読まれる。
+    assert scenario.steps[0]["value"] is False
+    assert scenario.steps[1]["value"] is True

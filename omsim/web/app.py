@@ -1,7 +1,8 @@
 """シミュレータの状態をブラウザへ配る FastAPI アプリ。
 
-Web が落ちてもシミュレーション本体は動き続ける。ここは snapshot の
-購読者に徹し、シミュレーション状態を書き換えない。
+Web が落ちてもシミュレーション本体は動き続ける。ここは基本的に snapshot の
+購読者に徹する。唯一の例外が /api/wiring で、CN4 の配線と安全リレーだけは
+ここから書き換える (CAN 上に現れない物理配線を操作する手段が他に無いため)。
 """
 import asyncio
 import json
@@ -9,9 +10,11 @@ import logging
 import os
 import threading
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+from omsim.sim.wiring import WiringError
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 PUSH_INTERVAL_SECONDS = 0.1
@@ -43,6 +46,24 @@ def create_app(hub):
     @app.get("/api/state")
     def get_state():
         return hub.payload()
+
+    @app.get("/api/wiring")
+    def get_wiring():
+        return hub.wiring()
+
+    @app.post("/api/wiring")
+    def post_wiring(body: dict):
+        # 監視だけの他のエンドポイントと違い、ここはシミュレーション状態を
+        # 書き換える (CN4 の配線と安全リレー)。
+        try:
+            return hub.set_wiring(
+                preset=body.get("preset"),
+                hwto1=body.get("hwto1"),
+                hwto2=body.get("hwto2"),
+                relay=body.get("relay"),
+            )
+        except WiringError as err:
+            raise HTTPException(status_code=400, detail=str(err))
 
     @app.get("/api/stubs")
     def get_stubs():

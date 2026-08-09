@@ -9,6 +9,7 @@ from omsim.node.realtime_bridge import RealtimeBridge
 from omsim.sim.clock import SimClock
 from omsim.sim.command_queue import CommandQueue
 from omsim.sim.sync_counter import SyncCounter
+from omsim.sim.wiring import Cn4Wiring
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +18,14 @@ NodeSpec.__new__.__defaults__ = (None,)
 
 
 class NodeManager(object):
-    def __init__(self, specs, network=None, realtime=True):
+    def __init__(self, specs, network=None, realtime=True, wiring=None):
         self.clock = SimClock(realtime=realtime)
+        # CN4 の配線構成と安全リレーの状態。リレーは既定で励磁 (通電) 状態。
+        self.wiring = wiring or Cn4Wiring.preset("standard")
+        # ノードごとに配線を変えたい場合の上書き (実機でもドライバごとに
+        # 配線は独立しうる)。空なら全ノードが self.wiring を使う。
+        self.node_wiring = {}
+        self.relay_energized = True
         self.network = network
         self.models = {}
         self.nodes = {}
@@ -37,6 +44,13 @@ class NodeManager(object):
             self.sync_counters[spec.node_id] = SyncCounter()
             self.nodes[spec.node_id] = build_local_node(
                 spec.node_id, od, model, queue=queue)
+
+    def wiring_for(self, node_id):
+        return self.node_wiring.get(node_id, self.wiring)
+
+    def set_node_wiring(self, node_id, wiring):
+        """1 ノードだけ配線を変える (全体は self.wiring のまま)。"""
+        self.node_wiring[node_id] = wiring
 
     def start(self):
         if self.network is None or self._started:
@@ -61,6 +75,8 @@ class NodeManager(object):
     def step(self):
         dt = self.clock.advance()
         for node_id, model in self.models.items():
+            model.set_hwto_inputs(
+                *self.wiring_for(node_id).hwto_inputs(self.relay_energized))
             sync_received = self.sync_counters[node_id].take() > 0
             for item, err in self.queues[node_id].drain(
                     model, sync_received=sync_received):

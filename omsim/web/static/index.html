@@ -23,6 +23,50 @@
       <div id="charts"></div>
     </section>
 
+    <section id="pane-hwto">
+      <h2>CN4 配線 / HWTO</h2>
+      <p class="note">
+        安全リレーが HWTO 入力をどう駆動するかを切り替えられます。
+        HWTO1 = CN4 11/12、HWTO2 = CN4 26/27。jumper は付属ジャンパーでの短絡
+        (常時 ON)、open は未接続 (常時 OFF) です。
+      </p>
+      <div class="toolbar">
+        <label>プリセット
+          <select id="wiring-preset">
+            <option value="standard">standard (2 重系)</option>
+            <option value="pitakuru">pitakuru (片系・実機)</option>
+            <option value="none">none (ジャンパ短絡)</option>
+          </select>
+        </label>
+        <label>HWTO1
+          <select id="wiring-hwto1">
+            <option value="relay">relay</option>
+            <option value="jumper">jumper</option>
+            <option value="open">open</option>
+          </select>
+        </label>
+        <label>HWTO2
+          <select id="wiring-hwto2">
+            <option value="relay">relay</option>
+            <option value="jumper">jumper</option>
+            <option value="open">open</option>
+          </select>
+        </label>
+        <button id="relay-toggle">安全リレーを切る</button>
+      </div>
+      <div id="hwto-status"></div>
+    </section>
+
+    <section id="pane-3d">
+      <h2>3D モニタ</h2>
+      <p class="note">
+        node ごとのモーターを表示し、実位置 (6064h) に合わせて軸を回します。
+        形状は STEP の実寸 (scripts/step_bbox.py で実測) に基づく近似です。
+        ドラッグで回転、ホイールでズーム。
+      </p>
+      <div id="motor3d"></div>
+    </section>
+
     <section id="pane-canlog">
       <h2>CAN フレームログ</h2>
       <div class="toolbar">
@@ -39,5 +83,6 @@
     </section>
 
     <script src="/static/app.js"></script>
+    <script type="module" src="/static/motor3d.js"></script>
   </body>
 </html>

@@ -30,6 +30,36 @@ class SnapshotHub(object):
     def frames(self, limit=100):
         return self._recorder.recent_frames(limit=limit)
 
+    # --- CN4 の配線 / 安全リレー ---
+    #
+    # ここだけは読み取り専用の原則から外れ、シミュレーション側の状態を
+    # 書き換える。「配線を変えて挙動を比べる」ことが目的の操作卓であり、
+    # CAN 上には現れない物理配線を触る手段が他に無いため。
+
+    def wiring(self):
+        manager = self._manager
+        hwto1_on, hwto2_on = manager.wiring.hwto_inputs(manager.relay_energized)
+        described = manager.wiring.describe()
+        described["preset"] = manager.wiring.preset_name()
+        described["relay"] = manager.relay_energized
+        described["inputs"] = {"hwto1_on": hwto1_on, "hwto2_on": hwto2_on}
+        return described
+
+    def set_wiring(self, preset=None, hwto1=None, hwto2=None, relay=None):
+        """不正な値は Cn4Wiring が WiringError を投げる (ここでは握らない)。"""
+        from omsim.sim.wiring import Cn4Wiring
+
+        manager = self._manager
+        if preset is not None:
+            manager.wiring = Cn4Wiring.preset(preset)
+        if hwto1 is not None or hwto2 is not None:
+            manager.wiring = Cn4Wiring(
+                hwto1=hwto1 if hwto1 is not None else manager.wiring.hwto1,
+                hwto2=hwto2 if hwto2 is not None else manager.wiring.hwto2)
+        if relay is not None:
+            manager.relay_energized = bool(relay)
+        return self.wiring()
+
     def payload(self, frame_limit=50):
         snapshot = self.latest()
         return {

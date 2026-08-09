@@ -1,7 +1,10 @@
 """YAML シナリオをマスタ役として流す最小版ランナー。"""
 import argparse
 import collections
+import contextlib
+import json
 import sys
+import urllib.request
 import time
 import xml.etree.ElementTree as ET
 
@@ -14,7 +17,7 @@ from omsim.node.eds import DEFAULT_EDS_PATH, find_eds
 Scenario = collections.namedtuple("Scenario", ["name", "nodes", "steps"])
 StepResult = collections.namedtuple("StepResult", ["index", "kind", "ok", "detail"])
 
-STEP_KINDS = ("nmt", "sdo_write", "sdo_read", "expect", "wait", "pdo_send")
+STEP_KINDS = ("nmt", "sdo_write", "sdo_read", "expect", "wait", "pdo_send", "relay")
 
 # SDO ラウンドトリップのタイムアウト。CPU 競合下では無負荷 median 2.1ms に
 # 対し median 61.7ms / p90 862ms / max 2.79s まで伸びることが実測されて
@@ -103,7 +106,27 @@ def _run_expect(remote, node_id, step, timeout):
     return False, "node{} actual={} expected={}".format(node_id, actual, step["value"])
 
 
-def run_scenario(scenario, network, timeout_default=2.0, eds=None):
+def set_relay(web_url, energized):
+    """omsim の Web API を叩いて安全リレーを操作する。
+
+    リレーは omsim プロセス内部の状態で、CAN 上には現れない。シナリオは
+    別プロセスのマスタ役なので、操作するには Web API を通すしかない。
+    --web-url を指定していないシナリオで relay ステップを使ったら、
+    黙って無視せずエラーにする。
+    """
+    if not web_url:
+        raise RuntimeError(
+            "relay ステップには --web-url が必要です "
+            "(omsim 側も --web-port を付けて起動してください)")
+    payload = json.dumps({"relay": bool(energized)}).encode("utf-8")
+    request = urllib.request.Request(
+        web_url.rstrip("/") + "/api/wiring", data=payload,
+        headers={"Content-Type": "application/json"}, method="POST")
+    with contextlib.closing(urllib.request.urlopen(request, timeout=2.0)) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def run_scenario(scenario, network, timeout_default=2.0, eds=None, web_url=None):
     remotes = _remote_nodes(network, scenario.nodes, find_eds(eds or DEFAULT_EDS_PATH))
     results = []
     for position, step in enumerate(scenario.steps):
@@ -127,6 +150,9 @@ def run_scenario(scenario, network, timeout_default=2.0, eds=None):
                         remote, node_id, step, float(step.get("timeout", timeout_default)))
                     if not ok:
                         break
+                elif kind == "relay":
+                    set_relay(web_url, step["value"])
+                    break
                 elif kind == "pdo_send":
                     network.send_message(_as_int(step["cob_id"]), bytes(step["data"]))
                 else:
@@ -166,12 +192,15 @@ def main(argv=None):
     parser.add_argument("--bitrate", type=int, default=500000)
     parser.add_argument("--eds", default=DEFAULT_EDS_PATH)
     parser.add_argument("--junit", default=None)
+    parser.add_argument(
+        "--web-url", default=None,
+        help="omsim の Web API の URL (relay ステップに必要。例 http://127.0.0.1:8080)")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     scenario = load_scenario(args.scenario)
     network = open_network(args.channel, args.interface, args.bitrate)
     try:
-        results = run_scenario(scenario, network, eds=args.eds)
+        results = run_scenario(scenario, network, eds=args.eds, web_url=args.web_url)
     finally:
         close_network(network)
     if args.junit:

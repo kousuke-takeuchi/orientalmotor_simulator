@@ -46,3 +46,19 @@ def test_sdo_cob_ids_do_not_collide_between_nodes():
     manager = make_manager(1, 2)
     assert manager.nodes[1].sdo.rx_cobid != manager.nodes[2].sdo.rx_cobid
     assert manager.nodes[1].emcy.cob_id != manager.nodes[2].emcy.cob_id
+
+
+def test_node_wiring_override_only_affects_that_node():
+    from omsim.node.eds import DEFAULT_EDS_PATH
+    from omsim.sim.manager import NodeManager, NodeSpec
+    from omsim.sim.wiring import Cn4Wiring
+
+    manager = NodeManager(
+        [NodeSpec(node_id=1, eds=DEFAULT_EDS_PATH),
+         NodeSpec(node_id=2, eds=DEFAULT_EDS_PATH)],
+        network=None, realtime=False)
+    manager.set_node_wiring(1, Cn4Wiring(hwto1="open", hwto2="jumper"))
+    for _ in range(5):
+        manager.step()
+    assert manager.models[1].power_cut is True
+    assert manager.models[2].power_cut is False
