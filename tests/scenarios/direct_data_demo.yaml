@@ -1,0 +1,25 @@
+name: ダイレクトデータ運転で連続運転してから絶対位置決めする
+nodes: [1]
+steps:
+  - nmt: start
+  - sdo_write: {index: 0x6040, value: 0x0006}
+  - sdo_write: {index: 0x6040, value: 0x0007}
+  - sdo_write: {index: 0x6040, value: 0x000F}
+  - sdo_write: {index: 0x4030, value: 6000}   # 加速レート
+  - sdo_write: {index: 0x4031, value: 6000}   # 減速レート
+  # 連続運転 (速度制御) を 200 r/min で起動
+  - sdo_write: {index: 0x402D, value: 16}
+  - sdo_write: {index: 0x402F, value: 200}
+  - sdo_write: {index: 0x4033, value: 1}      # 反映トリガ: 通常起動
+  - expect: {index: 0x606C, value: 200, tolerance: 5, timeout: 3.0}
+  # 反映トリガは自動クリアされる
+  - expect: {index: 0x4033, value: 0, timeout: 1.0}
+  # 減速停止してから絶対位置決め
+  - sdo_write: {index: 0x402D, value: 0}
+  - sdo_write: {index: 0x4033, value: 2}
+  - expect: {index: 0x606C, value: 0, tolerance: 2, timeout: 3.0}
+  - sdo_write: {index: 0x402D, value: 1}
+  - sdo_write: {index: 0x402E, value: 18000}
+  - sdo_write: {index: 0x402F, value: 300}
+  - sdo_write: {index: 0x4033, value: 3}
+  - expect: {index: 0x6064, value: 18000, tolerance: 40, timeout: 10.0}

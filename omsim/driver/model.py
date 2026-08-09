@@ -304,7 +304,14 @@ class DriverModel(object):
             self.profile.reset(0.0)
 
         ctx = self._context()
-        self.operation.step(dt, ctx)
+        self._apply_remote_inputs()
+        # ダイレクトデータ運転が動いている間は CiA402 の運転モードを止める。
+        # 両方が毎周期プロファイルを書くと指令を奪い合い、加減速レート次第で
+        # まったく加速しなくなる (実経路のテストで露見)。
+        if self._begin_direct_data():
+            self._step_direct_data(dt)
+        else:
+            self.operation.step(dt, ctx)
         self.operation.apply_status_bits(ctx)
 
         # HP-5143E 6.2 (p35) Transition 12: quick-stop-active はクイック
@@ -322,8 +329,6 @@ class DriverModel(object):
             if stopped and not action.stay_in_state:
                 self.state_machine.stop_completed()
 
-        self._apply_remote_inputs()
-        self._step_direct_data(dt)
         self._check_heartbeat_consumer()
         self._apply_travel_limits()
 
@@ -926,22 +931,22 @@ class DriverModel(object):
         snapshot["target"] = target
         self._direct_motion = snapshot
 
-    def _step_direct_data(self, dt):
-        """ダイレクトデータ運転を 1 ステップ進める。
+    def _begin_direct_data(self):
+        """起動待ちの反映トリガを処理し、運転中かどうかを返す。
 
-        CiA402 の運転モード (operation.step) は DriverModel.step の中で先に
-        呼ばれている。ダイレクトデータ運転が動いている間は、その結果を
-        上書きする形で位置/速度を作る。
+        True を返す間は CiA402 の運転モードを動かさない。
         """
         pending = self.direct_data.take_pending_start()
         if pending is not None:
             self._start_direct_motion(pending)
+        if self._direct_motion is not None and not self.plant.excited:
+            self._direct_motion = None
+        return self._direct_motion is not None
 
+    def _step_direct_data(self, dt):
+        """ダイレクトデータ運転を 1 ステップ進める。"""
         motion = self._direct_motion
         if motion is None:
-            return
-        if not self.plant.excited:
-            self._direct_motion = None
             return
 
         self.profile.acceleration = self.units.rpm_to_internal(motion["acceleration"])

@@ -187,3 +187,45 @@ def test_torque_limit_object_is_applied_as_a_ceiling():
     model = excited_model()
     model.write_object(0x4032, 0, 50)
     assert model.direct_torque_limit_permille == 50
+
+
+def test_validate_object_does_not_consume_the_trigger():
+    """4033h の検証 (SDO 受信時) が実モデルのトリガ状態を変えないこと。
+
+    write_trigger は「同じ値なら起動しない」ために直近値を覚える副作用が
+    あるので、_SHADOW_DEEP_ATTRS に direct_data が入っていないと、
+    検証だけで直近値が更新されて本番の起動が消える。
+    """
+    model = excited_model()
+    model.write_object(0x402D, 0, TYPE_CONTINUOUS_VELOCITY)
+    model.write_object(0x402F, 0, 200)
+    model.validate_object(0x4033, 0, 1)   # 検証だけ
+    trigger(model, 1)                      # 本番の書き込み
+    run(model, 500)
+    assert abs(model.read_object(0x606C) - 200) < 5
+
+
+def test_direct_data_runs_through_the_real_sdo_path():
+    """CAN 受信スレッドと同じ経路 (validate -> queue -> drain) で起動すること。
+
+    3 つの書込みが同じ 1ms に届く実運用の形。加減速レートを既定 (1000) の
+    ままにすると、CiA402 の運転モードと指令を奪い合っていた欠陥がここで出る。
+    """
+    from omsim.sim.command_queue import CommandQueue
+
+    model = DriverModel(node_id=1)
+    model.step(0.001)
+    for controlword in (0x0006, 0x0007, CW_ENABLE):
+        model.write_object(0x6040, 0, controlword)
+        model.step(0.001)
+
+    queue = CommandQueue()
+    for index, sub, value in ((0x402D, 0, TYPE_CONTINUOUS_VELOCITY),
+                              (0x402F, 0, 150),
+                              (0x4033, 0, 1)):
+        model.validate_object(index, sub, value)
+        queue.put(index, sub, value)
+    for _ in range(500):
+        queue.drain(model)
+        model.step(0.001)
+    assert abs(model.read_object(0x606C) - 150) < 5
