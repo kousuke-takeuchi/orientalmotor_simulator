@@ -118,3 +118,21 @@ def test_unknown_probe_or_edge_is_rejected():
         model.trigger_touch_probe(3, "positive")
     with pytest.raises(ValueError):
         model.trigger_touch_probe(1, "sideways")
+
+
+def test_validate_object_does_not_clear_stored_probe_values():
+    """60B8h の検証 (SDO 受信時) が実モデルのラッチ値を消してしまわないこと。
+
+    60B8h の writer は「無効化されたら保持値を捨てる」副作用を持つ。
+    _SHADOW_DEEP_ATTRS に touch probe の入れ物が入っていないと、
+    probe を無効化する値を SDO で書いた瞬間 (キューに積む前の検証段階) に
+    実モデルのラッチ値が消える。
+    """
+    model = model_at(position=321)
+    model.write_object(0x60B8, 0, P1_ENABLE | P1_POSITIVE)
+    model.trigger_touch_probe(1, "positive")
+    assert model.read_object(0x60BA) == 321
+
+    model.validate_object(0x60B8, 0, 0)   # 無効化を「検証だけ」する
+    assert model.read_object(0x60BA) == 321
+    assert model.read_object(0x60D5) == 1

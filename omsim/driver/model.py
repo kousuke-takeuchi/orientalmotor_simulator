@@ -228,6 +228,8 @@ class DriverModel(object):
         # 40D0h (Clear ETO) の writer が hwto を書き換えるため必須。
         # 漏らすと SDO 受信時の検証だけで実機の ETO が解除される。
         "hwto",
+        # 60B8h の writer は probe 無効化時にラッチ値とカウンタを捨てる。
+        "touch_probe_values", "touch_probe_counters",
     )
 
     def _shadow(self):
