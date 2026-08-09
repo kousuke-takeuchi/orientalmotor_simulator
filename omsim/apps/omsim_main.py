@@ -55,6 +55,11 @@ def parse_args(argv):
         "--list-stubs", action="store_true",
         help="未実装（スタブ）オブジェクトの一覧を出力して終了する",
     )
+    parser.add_argument(
+        "--coverage",
+        action="store_true",
+        help="EDS に対する実装網羅率と未実装オブジェクト一覧を出力して終了する",
+    )
     args = parser.parse_args(argv)
 
     eds_path = find_eds(args.eds)
@@ -83,6 +88,13 @@ def main(argv=None):
     if args.list_stubs:
         for line in format_stubs(DriverModel.router.stubs()):
             print(line)
+        return 0
+
+    if args.coverage:
+        from omsim.driver.coverage import coverage_report, format_report
+        from omsim.node.eds import load_eds
+
+        print(format_report(coverage_report(load_eds(args.eds), DriverModel.router)))
         return 0
 
     warn_ignored_mxex(args.nodes)

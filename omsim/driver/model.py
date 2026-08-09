@@ -65,9 +65,13 @@ class DriverModel(object):
         self.digital_outputs = 0
         self.profile_velocity_rpm = 1
         self.consumer_heartbeat_config = 0
+        self.producer_heartbeat_config = 0
         # 605Ah Quick stop option code: 未実装 (P5)。値は保持するのみで、
         # 挙動には反映しない（常に既定の「減速完了で switch-on-disabled」）。
         self.quick_stop_option_code = 2
+
+        # passthrough で書かれた値。インスタンスごとに独立。
+        self.passthrough_values = {}
 
     # --- 外向きの窓口は以下の 4 つだけ ---
 
@@ -348,6 +352,20 @@ class DriverModel(object):
     def _write_consumer_heartbeat_time(self, sub, value):
         self.consumer_heartbeat_config = int(value) & 0xFFFFFFFF
 
+    _PRODUCER_HEARTBEAT_STUB_REASON = (
+        "P3: Heartbeat producer 未実装。値の保持のみ。canopen ライブラリが"
+        "NmtSlave.send_command() 内で起動時に内部的に読むため、未登録のまま"
+        "だと全ノードが起動できず abort する（Step 7 で実測して判明）"
+    )
+
+    @router.reader(0x1017, stub=_PRODUCER_HEARTBEAT_STUB_REASON)
+    def _read_producer_heartbeat_time(self, sub):
+        return self.producer_heartbeat_config
+
+    @router.writer(0x1017, stub=_PRODUCER_HEARTBEAT_STUB_REASON)
+    def _write_producer_heartbeat_time(self, sub, value):
+        self.producer_heartbeat_config = int(value) & 0xFFFF
+
     @router.reader(0x6083)
     def _read_profile_acceleration(self, sub):
         return int(self.profile_acceleration_rpm_s)
@@ -445,3 +463,24 @@ class DriverModel(object):
         "何も伝わらない。配線 (reset 受信時に DriverModel を初期化し直す) "
         "は P3 で実施予定"
     )
+
+    # --- .mxex に保存される純パラメータ群 ---
+    # 値を保持して読み返せるが、挙動には効かない。実装フェーズは各行のとおり。
+    # netid == index - 0x4000 で mxex と対応する (設計書 2.3)。
+    _PASSTHROUGH_PARAMETERS = (
+        (0x4148, "P5: 絶対座標未設定時の絶対位置決め許可。値の保持のみ"),
+        (0x414B, "P5: ATL 機能モード設定。値の保持のみ"),
+        (0x415F, "P5: JOG/HOME トルク制限値。値の保持のみ"),
+        (0x4160, "P5: (HOME) 原点復帰モード。値の保持のみ"),
+        (0x4163, "P5: (HOME) 起動速度。値の保持のみ"),
+        (0x4169, "P5: (HOME) 2 センサ原点復帰の戻りステップ数。値の保持のみ"),
+        (0x4186, "P6: アラーム発生時の停止タイムアウト。値の保持のみ"),
+        (0x41A4, "P5: モーター回転方向。値の保持のみ"),
+        (0x41CA, "P5: WRAP 設定。値の保持のみ"),
+        (0x4735, "P4: カスタム停止レート。値の保持のみ"),
+        (0x4736, "P4: カスタム停止時間。値の保持のみ"),
+    )
+
+    for _index, _reason in _PASSTHROUGH_PARAMETERS:
+        router.passthrough(_index, 0, _reason)
+    del _index, _reason

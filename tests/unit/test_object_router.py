@@ -26,10 +26,6 @@ def test_read_dispatches_to_owner_instance():
     assert Fake.router.read(b, 0x6041, 0) == 99
 
 
-def test_unregistered_read_returns_none():
-    assert Fake.router.read(Fake(), 0x1008, 0) is None
-
-
 def test_write_dispatches_and_isolates_instances():
     a, b = Fake(), Fake()
     Fake.router.write(a, 0x6040, 0, 15)
@@ -84,3 +80,43 @@ def test_mark_stub_registers_an_entry_without_a_reader_or_writer():
     assert (0x0000, 0x81, "理由: OD 外の機能") in router.stubs()
     assert router.has_reader(0x0000, 0x81) is False
     assert router.has_writer(0x0000, 0x81) is False
+
+
+from omsim.driver.errors import ABORT_NOT_IN_OD
+
+
+class WithPassthrough(object):
+    router = ObjectRouter()
+
+    def __init__(self):
+        self.passthrough_values = {}
+
+    router.passthrough(0x414B, 0, "P5: ATL 機能は未実装。値の保持のみ")
+
+
+def test_unregistered_read_now_aborts_instead_of_returning_none():
+    with pytest.raises(ObjectAccessError) as exc:
+        Fake.router.read(Fake(), 0x1008, 0)
+    assert exc.value.abort_code == ABORT_NOT_IN_OD
+
+
+def test_passthrough_read_returns_none_until_written():
+    owner = WithPassthrough()
+    assert WithPassthrough.router.read(owner, 0x414B, 0) is None
+
+
+def test_passthrough_stores_and_reads_back():
+    owner = WithPassthrough()
+    WithPassthrough.router.write(owner, 0x414B, 0, 7)
+    assert WithPassthrough.router.read(owner, 0x414B, 0) == 7
+
+
+def test_passthrough_is_listed_as_a_stub():
+    entries = [(i, s) for i, s, _r in WithPassthrough.router.stubs()]
+    assert (0x414B, 0) in entries
+
+
+def test_passthrough_values_are_per_instance():
+    a, b = WithPassthrough(), WithPassthrough()
+    WithPassthrough.router.write(a, 0x414B, 0, 7)
+    assert WithPassthrough.router.read(b, 0x414B, 0) is None
