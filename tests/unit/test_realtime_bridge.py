@@ -75,3 +75,92 @@ def test_remote_frame_at_sync_cob_id_is_not_treated_as_sync():
                       is_remote_frame=True)
     listener.on_message_received(msg)
     assert sync_counter.take() == 0
+
+
+class FakeNetwork(object):
+    def __init__(self):
+        self.sent = []
+
+    def send_message(self, cob_id, data):
+        self.sent.append((cob_id, bytes(data)))
+
+
+def make_bridge_and_model(node_id=1):
+    od = load_eds(DEFAULT_EDS_PATH)
+    model = DriverModel(node_id=node_id)
+    bridge = RealtimeBridge()
+    bridge._tpdo_runtime[node_id] = bridge._make_tpdo_runtime()
+    return bridge, model, od
+
+
+def _sent_on(network, cob_id):
+    return [s for s in network.sent if s[0] == cob_id]
+
+
+def test_tpdo1_sync_acyclic_sends_once_after_a_change():
+    # TPDO1 の既定 transmission type は 255 (非同期) なので、SYNC 系の
+    # 挙動を見るには 0x00 (値が変化していれば次の SYNC で送信) にする。
+    bridge, model, od = make_bridge_and_model()
+    network = FakeNetwork()
+    model.write_object(0x1800, 2, 0x00)
+    model.write_object(0x6040, 0, 0x0006)  # statusword を変化させる
+    bridge.on_sync(1, model, network, od, sim_time=0.0)
+    assert len(_sent_on(network, model.tpdo_comm[0].cob_id)) == 1
+
+
+def test_tpdo1_sync_acyclic_does_not_resend_without_a_change():
+    bridge, model, od = make_bridge_and_model()
+    network = FakeNetwork()
+    model.write_object(0x1800, 2, 0x00)
+    bridge.on_sync(1, model, network, od, sim_time=0.0)
+    first_count = len(_sent_on(network, model.tpdo_comm[0].cob_id))
+    bridge.on_sync(1, model, network, od, sim_time=0.001)
+    # 変化なしなので増えない
+    assert len(_sent_on(network, model.tpdo_comm[0].cob_id)) == first_count
+
+
+def test_tpdo3_cyclic_nth_sync_sends_every_n_syncs():
+    bridge, model, od = make_bridge_and_model()
+    network = FakeNetwork()
+    model.write_object(0x1802, 2, 3)  # 3 回目の SYNC ごとに送信
+    for _ in range(2):
+        bridge.on_sync(1, model, network, od, sim_time=0.0)
+    tpdo3 = [s for s in network.sent if s[0] == model.tpdo_comm[2].cob_id]
+    assert len(tpdo3) == 0
+    bridge.on_sync(1, model, network, od, sim_time=0.0)
+    tpdo3 = [s for s in network.sent if s[0] == model.tpdo_comm[2].cob_id]
+    assert len(tpdo3) == 1
+
+
+def test_event_driven_tpdo_sends_after_inhibit_time_elapses():
+    bridge, model, od = make_bridge_and_model()
+    network = FakeNetwork()
+    model.write_object(0x1800, 3, 10)  # inhibit = 10 * 100us = 1ms
+    bridge.step(1, model, network, od, sim_time=0.0)  # 初回送信
+    initial = len(network.sent)
+    model.write_object(0x6040, 0, 0x0006)  # 変化させる
+    bridge.step(1, model, network, od, sim_time=0.0005)  # inhibit 未経過
+    assert len(network.sent) == initial
+    bridge.step(1, model, network, od, sim_time=0.0011)  # inhibit 経過
+    assert len(network.sent) == initial + 1
+
+
+def test_event_timer_resends_even_without_a_change():
+    bridge, model, od = make_bridge_and_model()
+    network = FakeNetwork()
+    model.write_object(0x1800, 5, 5)  # event timer = 5ms
+    bridge.step(1, model, network, od, sim_time=0.0)
+    initial = len(network.sent)
+    bridge.step(1, model, network, od, sim_time=0.006)  # 変化無しでも 5ms 経過
+    assert len(network.sent) == initial + 1
+
+
+def test_disabled_tpdo_never_sends():
+    bridge, model, od = make_bridge_and_model()
+    network = FakeNetwork()
+    for index in (0x1800, 0x1801, 0x1802, 0x1803):
+        slot = index - 0x1800
+        model.write_object(index, 1, model.tpdo_comm[slot].cob_id | (1 << 31))
+    bridge.on_sync(1, model, network, od, sim_time=0.0)
+    bridge.step(1, model, network, od, sim_time=0.0)
+    assert network.sent == []

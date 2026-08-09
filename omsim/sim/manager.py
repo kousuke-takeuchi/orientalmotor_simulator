@@ -70,6 +70,12 @@ class NodeManager(object):
                 )
             model.step(dt)
             self._drain_emcy(node_id, model)
+            if self.network is not None and self._started:
+                od = self.eds[node_id]
+                if sync_received:
+                    self.bridge.on_sync(
+                        node_id, model, self.network, od, self.clock.now)
+                self.bridge.step(node_id, model, self.network, od, self.clock.now)
 
     def _drain_emcy(self, node_id, model):
         """AlarmModel に溜まった EMCY をバスへ送出する。
