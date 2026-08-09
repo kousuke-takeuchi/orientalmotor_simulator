@@ -300,6 +300,7 @@ class DriverModel(object):
                 self.state_machine.stop_completed()
 
         self._check_heartbeat_consumer()
+        self._apply_travel_limits()
 
     @property
     def effective_deceleration_rpm_s(self):
@@ -430,6 +431,12 @@ class DriverModel(object):
         # HP-5143E 60FDh 実測: bit0 NLS / bit1 PLS / bit2 HS / bit3 HWTO /
         # bit16-31 R-OUT。リミットセンサとリモート出力は P4 以降のため 0。
         value = 0
+        if self.limit_inputs["rv_ls"]:
+            value |= 1 << 0   # NLS: Negative limit switch
+        if self.limit_inputs["fw_ls"]:
+            value |= 1 << 1   # PLS: Positive limit switch
+        if self.limit_inputs["home"]:
+            value |= 1 << 2   # HS: Home switch
         if self.hwto.hwtoin_mon:
             value |= 1 << 3
         return value
@@ -706,6 +713,60 @@ class DriverModel(object):
     @router.reader(0x409B, stub="P6: 主電源電流のモデル未実装。常に 0 [mA] を返すだけ")
     def _read_main_power_current(self, sub):
         return 0
+
+    def _limit_window(self):
+        """(下限, 上限) を返す。無効なら None。
+
+        HP-5143E 607Dh 実測: 「Corrected limit = limit - Home offset」で
+        補正した値と実位置を比べる。
+        """
+        if not self.software_limits_active:
+            return None
+        return (self.software_min_position - self.home_offset,
+                self.software_max_position - self.home_offset)
+
+    def _blocked_direction(self):
+        """止めるべき方向を返す (+1 / -1 / 0)。
+
+        リミットセンサ (FW-LS / RV-LS) とソフトウェアリミットの両方を見る。
+        センサに当たっていても反対方向へは動けること (HP-5141J の一般的な
+        リミット動作) を守るため、方向つきで返す。
+        """
+        blocked = 0
+        if self.limit_inputs["fw_ls"]:
+            blocked = +1
+        if self.limit_inputs["rv_ls"]:
+            blocked = -1 if blocked == 0 else blocked
+        window = self._limit_window()
+        if window is not None:
+            position = int(self.plant.position)
+            if position >= window[1]:
+                blocked = +1
+            elif position <= window[0]:
+                blocked = -1
+        return blocked
+
+    def _apply_travel_limits(self):
+        """リミットに当たっていたら、その方向の動きだけを止める。"""
+        blocked = self._blocked_direction()
+        self.state_machine.internal_limit_active = blocked != 0
+        if blocked == 0:
+            return
+        velocity = self.plant.velocity
+        if (blocked > 0 and velocity > 0) or (blocked < 0 and velocity < 0):
+            self.plant.velocity = 0.0
+            self.profile.reset(0.0)
+        window = self._limit_window()
+        if window is None:
+            return
+        # ソフトウェアリミットは位置そのものが境界を越えないよう押し戻す。
+        # 速度を 0 にするだけだと、毎周期わずかに動いては止められて、
+        # 境界の外へじりじり進んでしまう (実測で 3000 周期に 57 increment)。
+        position = int(self.plant.position)
+        if position > window[1]:
+            self.plant.preset_position(window[1])
+        elif position < window[0]:
+            self.plant.preset_position(window[0])
 
     # --- hm (Homing) と原点まわり ---
 
