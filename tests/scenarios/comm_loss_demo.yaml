@@ -1,0 +1,17 @@
+name: 通信途絶で自動停止する (Heartbeat consumer 0.5 秒)
+nodes: [1]
+steps:
+  - nmt: start
+  - sdo_write: {index: 0x6060, value: 3}
+  - sdo_write: {index: 0x6083, value: 6000}
+  - sdo_write: {index: 0x6084, value: 6000}
+  - sdo_write: {index: 0x6040, value: 0x0006}
+  - sdo_write: {index: 0x6040, value: 0x0007}
+  - sdo_write: {index: 0x6040, value: 0x000F}
+  - sdo_write: {index: 0x60FF, value: 200}
+  - expect: {index: 0x606C, value: 200, tolerance: 5, timeout: 3.0}
+  # マスタ (node 3) の heartbeat を 500ms 監視する設定
+  - sdo_write: {index: 0x1016, sub: 1, value: 0x000301F4}
+  # このシナリオは heartbeat を送らないので、設定した瞬間から 0.5 秒で停止する
+  - expect: {index: 0x606C, value: 0, tolerance: 2, timeout: 3.0}
+  - expect: {index: 0x6041, mask: 0x0008, value: 0x0008, timeout: 2.0}   # Fault

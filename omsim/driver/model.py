@@ -12,6 +12,7 @@ from omsim.driver.alarm_codes import (
 )
 from omsim.driver.alarm_model import (
     ALARM_HWTO_CIRCUIT,
+    ALARM_NETWORK_BUS_ERROR,
     ALARM_HWTO_DETECTED,
     EMCY_HEARTBEAT_ERROR,
     EMCY_HWTO_CIRCUIT,
@@ -349,8 +350,10 @@ class DriverModel(object):
 
         self._apply_hwto(dt)
 
-        if self.alarms.is_active:
-            self.state_machine.set_fault(True)
+        # fault フラグはアラームの有無に同期させる。True を立てるだけだと、
+        # アラームが自分で解除されたとき (Heartbeat の復帰など) にフラグが
+        # 残り、Controlword bit7 の Fault reset を受け付けなくなる。
+        self.state_machine.set_fault(self.alarms.is_active)
         self.state_machine.step(dt)
 
         self._sync_excited()
@@ -1947,8 +1950,12 @@ class DriverModel(object):
             return
         elapsed_ms = (self.sim_time - self._heartbeat_consumer_reference_time) * 1000.0
         if elapsed_ms > self.heartbeat_consumer_time_ms:
+            # アラームコードは 81h (Network bus error)。EMCY は CiA301 の
+            # 8130h (node guarding / heartbeat error) を使う (HP-5143E 4.5 実測)。
             self.alarms.raise_alarm(
-                alarm_code=0, emcy_code=EMCY_HEARTBEAT_ERROR, error_register=0x11)
+                alarm_code=ALARM_NETWORK_BUS_ERROR,
+                emcy_code=EMCY_HEARTBEAT_ERROR,
+                error_register=0x11)
 
     def on_heartbeat_received(self, node_id, sim_time):
         """監視対象ノードからの Heartbeat/boot-up 受信を伝える。
