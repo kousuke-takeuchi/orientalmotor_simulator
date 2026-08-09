@@ -298,3 +298,144 @@ class ProfileTorqueMode(OperationMode):
         ctx.state_machine.torque_limit_active = self._limited
         ctx.state_machine.operation_mode_specific_12 = False
         ctx.state_machine.operation_mode_specific_13 = False
+
+
+class HomingMode(OperationMode):
+    """Homing Mode (hm)。HP-5143E 7.5 (p50-57)。
+
+    Controlword: bit4 HOS (Homing operation start)
+    Statusword : bit10 TR / bit12 HA (Homing attained) / bit13 HE (Homing error)
+      bit13/bit12/bit10 = 0/0/0 進行中、0/0/1 中断または未開始、
+                          0/1/1 正常完了 (7.5.4 の表)
+
+    サポートする方式 (7.5.5 実測):
+      17 / 18 : リミットセンサ (RV-LS / FW-LS) で原点出し
+      24 / 28 : HOME センサ (HOMES) で原点出し。24 は正方向、28 は負方向から
+      35 / 37 : 現在位置を原点にする (35 と 37 は同一動作)
+    index pulse (ZSG-N) を使う 1/2/8/12 とメーカ固有の -1 は未対応。
+    """
+
+    MODE_CODE = 6
+
+    CW_HOMING_START = 1 << 4
+    CW_HALT = 1 << 8
+
+    # (方式 -> (探索方向, センサ名))
+    SEARCH = {
+        17: (-1, "rv_ls"),
+        18: (+1, "fw_ls"),
+        24: (+1, "home"),
+        28: (-1, "home"),
+    }
+    CURRENT_POSITION_METHODS = (35, 37)
+
+    # 状態
+    IDLE = "idle"
+    SEARCHING = "searching"      # センサへ向かう
+    LEAVING = "leaving"          # センサから抜ける
+    BACKING_OFF = "backing_off"  # 4169h ぶん戻る
+    DONE = "done"
+
+    def __init__(self):
+        self._previous_start = False
+        self._phase = self.IDLE
+        self._attained = False
+        self._error = False
+        self._backoff_target = None
+
+    @property
+    def mode_code(self):
+        return self.MODE_CODE
+
+    def _sensor(self, ctx, name):
+        return bool(getattr(ctx.params, "limit_inputs", {}).get(name, False))
+
+    def _finish(self, ctx):
+        ctx.plant.preset_position(int(ctx.params.home_offset))
+        ctx.profile.reset(0.0)
+        ctx.plant.velocity = 0.0
+        self._phase = self.DONE
+        self._attained = True
+        ctx.params.on_homing_completed()
+
+    def step(self, dt, ctx):
+        params = ctx.params
+        controlword = ctx.state_machine.controlword
+        start = bool(controlword & self.CW_HOMING_START)
+        rising = start and not self._previous_start
+        self._previous_start = start
+
+        ctx.profile.acceleration = ctx.units.rpm_to_internal(params.homing_acceleration_rpm_s)
+        ctx.profile.deceleration = ctx.units.rpm_to_internal(params.homing_acceleration_rpm_s)
+
+        if not ctx.state_machine.is_operation_enabled:
+            self._phase = self.IDLE
+            self._attained = False
+            ctx.profile.set_target(0.0)
+            ctx.profile.step(dt)
+            ctx.plant.step(dt, ctx.profile.command)
+            return
+
+        if rising:
+            self._attained = False
+            self._error = False
+            if params.homing_method in self.CURRENT_POSITION_METHODS:
+                self._finish(ctx)
+                return
+            self._phase = self.SEARCHING
+
+        if controlword & self.CW_HALT:
+            ctx.profile.set_target(0.0)
+        elif self._phase == self.SEARCHING:
+            direction, sensor = self.SEARCH[params.homing_method]
+            if self._sensor(ctx, sensor):
+                self._phase = self.LEAVING
+                ctx.profile.set_target(0.0)
+            else:
+                ctx.profile.set_target(
+                    direction * ctx.units.rpm_to_internal(params.homing_speed_switch_rpm))
+        elif self._phase == self.LEAVING:
+            direction, sensor = self.SEARCH[params.homing_method]
+            if self._sensor(ctx, sensor):
+                # センサから抜けるまで逆方向へ
+                ctx.profile.set_target(
+                    -direction * ctx.units.rpm_to_internal(params.homing_speed_zero_rpm))
+            else:
+                # 抜けた。4169h (2 センサ原点復帰の戻りステップ数) ぶん進んで停止
+                steps = int(params.homing_backward_steps)
+                self._backoff_target = int(ctx.plant.position) - direction * steps
+                self._phase = self.BACKING_OFF
+        elif self._phase == self.BACKING_OFF:
+            remaining = self._backoff_target - int(ctx.plant.position)
+            threshold = ctx.units.rpm_to_internal(params.velocity_threshold_rpm)
+            if abs(remaining) <= 2:
+                # 戻り量に着いた (4169h が 0 なら最初からここ)。停止したら完了。
+                ctx.profile.set_target(0.0)
+                if abs(ctx.plant.velocity) <= threshold:
+                    self._finish(ctx)
+                    return
+            else:
+                # 残距離で止まりきれる速度まで落として寄せる (pp と同じ考え方)。
+                # 一定速で突っ込むと目標を通り過ぎて振動する。
+                speed = ctx.units.rpm_to_internal(params.homing_speed_zero_rpm)
+                deceleration = ctx.units.rpm_to_internal(
+                    params.homing_acceleration_rpm_s)
+                stoppable = (2.0 * deceleration * abs(remaining)) ** 0.5
+                velocity = min(speed, stoppable)
+                ctx.profile.set_target(velocity if remaining > 0 else -velocity)
+        else:
+            ctx.profile.set_target(0.0)
+
+        ctx.profile.step(dt)
+        ctx.plant.step(dt, ctx.profile.command)
+
+    def apply_status_bits(self, ctx):
+        stopped = (
+            abs(ctx.units.internal_to_rpm(ctx.plant.velocity))
+            <= ctx.params.velocity_threshold_rpm)
+        in_progress = self._phase in (self.SEARCHING, self.LEAVING, self.BACKING_OFF)
+        # 7.5.4 の表: 進行中は bit10=0、完了で bit12=bit10=1
+        ctx.state_machine.target_reached = (not in_progress) and stopped
+        ctx.state_machine.operation_mode_specific_12 = self._attained
+        ctx.state_machine.operation_mode_specific_13 = self._error
+        ctx.state_machine.torque_limit_active = False

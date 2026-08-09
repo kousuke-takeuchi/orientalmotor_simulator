@@ -24,6 +24,7 @@ from omsim.driver.errors import (
 from omsim.driver.motor_plant import MotorPlant
 from omsim.driver.objects import ObjectRouter
 from omsim.driver.operation import (
+    HomingMode,
     OperationContext,
     ProfilePositionMode,
     ProfileTorqueMode,
@@ -117,6 +118,19 @@ class DriverModel(object):
         self.direct_torque_limit_permille = 10000
         self.digital_outputs = 0
         self.profile_velocity_rpm = 1
+        # hm (Homing) 用。既定値は EDS 実測 (6098h=37 / 6099h=60,30 / 609Ah=1000)
+        self.homing_method = 37
+        self.homing_speed_switch_rpm = 60
+        self.homing_speed_zero_rpm = 30
+        self.homing_acceleration_rpm_s = 1000
+        self.home_offset = 0
+        self.homing_completed = False
+        # CN4 のリミット/HOME センサ入力 (実配線は P5)
+        self.limit_inputs = {"fw_ls": False, "rv_ls": False, "home": False}
+        # 607Dh Software position limit
+        self.software_min_position = 0
+        self.software_max_position = 0
+
         # tq (Profile Torque) 用
         self.target_torque = 0
         self.torque_slope = 0
@@ -569,6 +583,7 @@ class DriverModel(object):
         MODE_PV: ProfileVelocityMode,
         MODE_PP: ProfilePositionMode,
         MODE_TQ: ProfileTorqueMode,
+        MODE_HM: HomingMode,
     }
 
     @router.writer(0x6060)
@@ -691,6 +706,119 @@ class DriverModel(object):
     @router.reader(0x409B, stub="P6: 主電源電流のモデル未実装。常に 0 [mA] を返すだけ")
     def _read_main_power_current(self, sub):
         return 0
+
+    # --- hm (Homing) と原点まわり ---
+
+    def set_limit_inputs(self, fw_ls=None, rv_ls=None, home=None):
+        """CN4 のリミット / HOME センサ入力を伝える (実配線は P5)。"""
+        for name, value in (("fw_ls", fw_ls), ("rv_ls", rv_ls), ("home", home)):
+            if value is not None:
+                self.limit_inputs[name] = bool(value)
+
+    def on_homing_completed(self):
+        """HomingMode から呼ばれる。原点復帰完了でソフトリミットが有効になる。"""
+        self.homing_completed = True
+
+    @property
+    def homing_backward_steps(self):
+        """4169h (HOME) 2 センサ原点復帰の戻りステップ数。未設定なら 0。"""
+        value = self.passthrough_values.get((0x4169, 0))
+        return int(value) if value is not None else 0
+
+    @property
+    def software_limits_active(self):
+        """607Dh が効いているか。
+
+        HP-5143E 607Dh 実測: 有効になるのは原点復帰完了後。Min >= Max、または
+        Min/Max がともに 0 のときは無効。
+        """
+        if not self.homing_completed:
+            return False
+        if self.software_min_position == 0 and self.software_max_position == 0:
+            return False
+        return self.software_min_position < self.software_max_position
+
+    _UNSUPPORTED_HOMING_METHODS = (1, 2, 8, 12, -1)
+
+    @router.reader(0x6098)
+    def _read_homing_method(self, sub):
+        return self.homing_method
+
+    @router.writer(0x6098)
+    def _write_homing_method(self, sub, value):
+        method = int(value)
+        if not (-1 <= method <= 37):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6098h は -1〜37")
+        if method in self._UNSUPPORTED_HOMING_METHODS:
+            raise NotImplementedObjectError(
+                ABORT_VALUE_RANGE,
+                "6098h の方式 {} は未実装 (index pulse (ZSG-N) / メーカ固有)".format(method))
+        if method not in HomingMode.SEARCH and method not in HomingMode.CURRENT_POSITION_METHODS:
+            raise NotImplementedObjectError(
+                ABORT_VALUE_RANGE, "6098h の方式 {} は未実装".format(method))
+        self.homing_method = method
+
+    @router.reader(0x6099, 0)
+    def _read_homing_speeds_count(self, sub):
+        return 2
+
+    @router.reader(0x6099, 1)
+    def _read_homing_speed_switch(self, sub):
+        return int(self.homing_speed_switch_rpm)
+
+    @router.writer(0x6099, 1)
+    def _write_homing_speed_switch(self, sub, value):
+        if not (1 <= int(value) <= 4000000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6099h:01 は 1〜4,000,000")
+        self.homing_speed_switch_rpm = int(value)
+
+    @router.reader(0x6099, 2)
+    def _read_homing_speed_zero(self, sub):
+        return int(self.homing_speed_zero_rpm)
+
+    @router.writer(0x6099, 2)
+    def _write_homing_speed_zero(self, sub, value):
+        if not (1 <= int(value) <= 4000000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6099h:02 は 1〜4,000,000")
+        self.homing_speed_zero_rpm = int(value)
+
+    @router.reader(0x609A)
+    def _read_homing_acceleration(self, sub):
+        return int(self.homing_acceleration_rpm_s)
+
+    @router.writer(0x609A)
+    def _write_homing_acceleration(self, sub, value):
+        if int(value) <= 0:
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "609Ah は 1 以上")
+        self.homing_acceleration_rpm_s = int(value)
+
+    @router.reader(0x607C)
+    def _read_home_offset(self, sub):
+        return _clamp_int32(self.home_offset)
+
+    @router.writer(0x607C)
+    def _write_home_offset(self, sub, value):
+        self.home_offset = _clamp_int32(value)
+
+    @router.reader(0x607D, 0)
+    def _read_software_limit_count(self, sub):
+        return 2
+
+    @router.reader(0x607D, 1)
+    def _read_software_min_position(self, sub):
+        return _clamp_int32(self.software_min_position)
+
+    @router.writer(0x607D, 1)
+    def _write_software_min_position(self, sub, value):
+        self.software_min_position = _clamp_int32(value)
+
+    @router.reader(0x607D, 2)
+    def _read_software_max_position(self, sub):
+        return _clamp_int32(self.software_max_position)
+
+    @router.writer(0x607D, 2)
+    def _write_software_max_position(self, sub, value):
+        self.software_max_position = _clamp_int32(value)
 
     @router.reader(0x6071)
     def _read_target_torque(self, sub):

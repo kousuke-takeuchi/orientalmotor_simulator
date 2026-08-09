@@ -19,8 +19,8 @@ def test_known_implemented_object_is_counted_as_implemented():
 def test_known_unimplemented_object_is_listed():
     od = load_eds(DEFAULT_EDS_PATH)
     report = coverage_report(od, DriverModel.router)
-    # 6098h Homing method は hm モード (P4 の後続タスク) まで未実装
-    assert (0x6098, 0) in report["unimplemented_list"]
+    # 60F4h Following error actual value は P6 (6065h/6066h) まで未実装
+    assert (0x60F4, 0) in report["unimplemented_list"]
 
 
 def test_unimplemented_list_is_sorted():
