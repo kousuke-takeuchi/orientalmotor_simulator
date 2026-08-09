@@ -17,7 +17,7 @@ var STATUSWORD_BITS = [
   [12, "Speed is 0 (pv)"]
 ];
 
-var state = { paused: false, filter: "", nodes: {} };
+var state = { canlogPaused: false, filter: "", nodes: {}, frames: [] };
 
 var HISTORY_POINTS = 300;  // 100ms 間隔 x 300 = 30 秒ぶん
 
@@ -161,6 +161,33 @@ function renderStatus(nodes) {
   });
 }
 
+function renderCanLog(frames) {
+  var pre = document.getElementById("canlog");
+  var filter = state.filter.toLowerCase();
+  var lines = frames.filter(function (frame) {
+    if (!filter) return true;
+    var haystack = (frame.text + " " + frame.can_id.toString(16) + " " + frame.data).toLowerCase();
+    return haystack.indexOf(filter) !== -1;
+  }).map(function (frame) {
+    return fixed(frame.t, 3) + "  " +
+      ("00" + frame.can_id.toString(16).toUpperCase()).slice(-3) + "  " +
+      frame.text;
+  });
+  pre.textContent = lines.join("\n");
+  pre.scrollTop = pre.scrollHeight;
+}
+
+document.getElementById("filter").addEventListener("input", function (event) {
+  state.filter = event.target.value;
+  renderCanLog(state.frames || []);
+});
+
+document.getElementById("pause").addEventListener("click", function (event) {
+  state.canlogPaused = !state.canlogPaused;
+  event.target.textContent = state.canlogPaused ? "再開" : "停止";
+  if (!state.canlogPaused) renderCanLog(state.frames || []);
+});
+
 function onMessage(payload) {
   document.getElementById("simtime").textContent =
     "t = " + fixed(payload.sim_time, 3) + " s";
@@ -168,6 +195,9 @@ function onMessage(payload) {
   renderStatus(payload.nodes);
   pushHistory(payload.nodes);
   renderCharts(payload.nodes);
+
+  state.frames = payload.frames;
+  if (!state.canlogPaused) renderCanLog(payload.frames);
 }
 
 function connect() {
@@ -183,7 +213,6 @@ function connect() {
     setTimeout(connect, 1000);
   };
   socket.onmessage = function (event) {
-    if (state.paused) return;
     onMessage(JSON.parse(event.data));
   };
 }

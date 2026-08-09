@@ -29,6 +29,10 @@
         <input id="filter" type="text" placeholder="フィルタ (例: SDO, 6041, node1)" />
         <button id="pause">停止</button>
       </div>
+      <p class="note">
+        SocketCAN の receive_own_messages が既定で無効のため、omsim 自身が送信した
+        フレーム (SDO レスポンス / boot-up / EMCY) は表示されません。受信フレームのみです。
+      </p>
       <pre id="canlog"></pre>
     </section>
 

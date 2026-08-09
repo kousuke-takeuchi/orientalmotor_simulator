@@ -76,3 +76,23 @@ def test_app_js_charts_velocity_position_and_torque():
     assert "SERIES" in js
     for key in ("actual_velocity_rpm", "actual_position", "torque_permille"):
         assert key in js
+
+
+def test_app_js_renders_the_can_log_with_filter_and_pause():
+    js = _read("app.js")
+    assert "renderCanLog" in js
+    assert "filter" in js
+    assert "pause" in js
+
+
+def test_index_notes_the_receive_only_limitation():
+    html = _read("index.html")
+    assert "受信" in html
+
+
+def test_app_js_can_log_pause_is_separate_from_the_global_pause_flag():
+    js = _read("app.js")
+    assert "canlogPaused" in js
+    onmessage_start = js.index("socket.onmessage")
+    onmessage_body = js[onmessage_start:js.index("};", onmessage_start)]
+    assert "state.paused" not in onmessage_body
