@@ -352,18 +352,21 @@ class DriverModel(object):
     def _write_consumer_heartbeat_time(self, sub, value):
         self.consumer_heartbeat_config = int(value) & 0xFFFFFFFF
 
-    _PRODUCER_HEARTBEAT_STUB_REASON = (
-        "P3: Heartbeat producer 未実装。値の保持のみ。canopen ライブラリが"
-        "NmtSlave.send_command() 内で起動時に内部的に読むため、未登録のまま"
-        "だと全ノードが起動できず abort する（Step 7 で実測して判明）"
-    )
-
-    @router.reader(0x1017, stub=_PRODUCER_HEARTBEAT_STUB_REASON)
+    @router.reader(0x1017)
     def _read_producer_heartbeat_time(self, sub):
+        # Heartbeat producer は canopen.LocalNode.__init__() が
+        # self.add_write_callback(self.nmt.on_write) を無条件に登録して
+        # おり、NmtSlave が 1017h への書き込みをフックして
+        # network.send_periodic() で周期送信を開始するため、実装済み。
+        # ただし DriverModel 側には配線されていない（ドライバの状態には
+        # 影響しない）。値の保持と CANopen への受け渡しのみ行う。
+        # controller の実測確認: 1017h=200 で CAN ID 701 に 200ms 周期
+        # でハートビートフレーム (701 [1] 7F) が出現。
         return self.producer_heartbeat_config
 
-    @router.writer(0x1017, stub=_PRODUCER_HEARTBEAT_STUB_REASON)
+    @router.writer(0x1017)
     def _write_producer_heartbeat_time(self, sub, value):
+        # 上記の通り canopen.NmtSlave がフックして周期送信を管理する。
         self.producer_heartbeat_config = int(value) & 0xFFFF
 
     @router.reader(0x6083)
