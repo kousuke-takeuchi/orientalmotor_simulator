@@ -84,3 +84,35 @@ def test_reading_reports_the_storage_capability():
     model = DriverModel(node_id=1)
     assert model.read_object(0x1010, 1) & 1
     assert model.read_object(0x1011, 1) & 1
+
+
+def test_validate_object_does_not_actually_store_or_restore():
+    """1010h/1011h の検証 (SDO 受信時) が実モデルを保存/復帰させないこと。
+
+    writer が保存領域とモデル全体を書き換えるので、_SHADOW_DEEP_ATTRS の
+    漏れがあると SDO を受けた瞬間 (キューに積む前) に効いてしまう。
+    """
+    model = DriverModel(node_id=1)
+    model.write_object(0x6083, 0, 2000)
+    model.write_object(0x1010, 1, SAVE)      # 2000 を保存
+    model.write_object(0x6083, 0, 5000)
+
+    model.validate_object(0x1010, 1, SAVE)   # 検証だけ (5000 を保存してはいけない)
+    model.restore_saved_parameters()
+    assert model.read_object(0x6083) == 2000
+
+    model.write_object(0x6083, 0, 5000)
+    model.validate_object(0x1011, 1, LOAD)   # 検証だけ (既定値へ戻してはいけない)
+    assert model.read_object(0x6083) == 5000
+
+
+def test_validate_object_does_not_store_communication_parameters_either():
+    """1010h:02 は保存領域を in-place 更新するため、共有していると漏れる。"""
+    model = DriverModel(node_id=1)
+    model.write_object(0x1006, 0, 5000)
+    model.write_object(0x1010, 2, SAVE)      # 5000 を保存
+    model.write_object(0x1006, 0, 9000)
+
+    model.validate_object(0x1010, 2, SAVE)   # 検証だけ (9000 を保存してはいけない)
+    model.restore_saved_parameters()
+    assert model.read_object(0x1006) == 5000

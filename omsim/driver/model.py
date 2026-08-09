@@ -261,6 +261,8 @@ class DriverModel(object):
         "touch_probe_values", "touch_probe_counters",
         # 4033h の writer が起動待ちトリガと直近値を書き換える。
         "direct_data",
+        # 1010h:02 の writer が保存領域を in-place 更新する。
+        "_saved_parameters",
     )
 
     def _shadow(self):
