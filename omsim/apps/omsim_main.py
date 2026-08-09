@@ -60,6 +60,13 @@ def parse_args(argv):
         action="store_true",
         help="EDS に対する実装網羅率と未実装オブジェクト一覧を出力して終了する",
     )
+    parser.add_argument(
+        "--web-port",
+        type=int,
+        default=None,
+        help="指定するとブラウザ用の Web サーバをこのポートで起動する",
+    )
+    parser.add_argument("--web-host", default="0.0.0.0")
     args = parser.parse_args(argv)
 
     eds_path = find_eds(args.eds)
@@ -105,6 +112,15 @@ def main(argv=None):
     attach_recorder(network, recorder, manager.clock)
     manager.start()
 
+    hub = None
+    if args.web_port is not None:
+        from omsim.web.app import run_web
+        from omsim.web.hub import SnapshotHub
+
+        hub = SnapshotHub(manager, recorder)
+        run_web(hub, host=args.web_host, port=args.web_port)
+        print("omsim web: http://{}:{}/".format(args.web_host, args.web_port))
+
     stopping = {"flag": False}
 
     def on_signal(signum, frame):
@@ -120,6 +136,8 @@ def main(argv=None):
             manager.step()
             if manager.clock.tick_count % 100 == 0:
                 recorder.state(manager.snapshot())
+            if hub is not None and manager.clock.tick_count % 20 == 0:
+                hub.capture()
             if args.duration is not None and manager.clock.now >= args.duration:
                 break
     finally:
