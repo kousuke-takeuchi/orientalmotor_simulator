@@ -13,9 +13,21 @@ var STATUSWORD_BITS = [
   [7, "Warning"],
   [9, "Remote"],
   [10, "Target reached"],
-  [11, "Internal limit active"],
-  [12, "Speed is 0 (pv)"]
+  [11, "Internal limit active"]
 ];
+
+// bit12/13/15 は運転モードで意味が変わる (HP-5143E 7.2.4 / 7.3.4 / 7.4.4 / 7.5.4)。
+// モード番号は 6061h の値。
+var MODE_SPECIFIC_BITS = {
+  1: [[12, "Set point acknowledge (pp)"], [13, "Following error (pp)"], [15, "Torque limit"]],
+  3: [[12, "Speed is 0 (pv)"]],
+  4: [[15, "Torque limit (tq)"]],
+  6: [[12, "Homing attained (hm)"], [13, "Homing error (hm)"], [15, "Torque limit"]]
+};
+
+function statuswordBits(mode) {
+  return STATUSWORD_BITS.concat(MODE_SPECIFIC_BITS[mode] || []);
+}
 
 var state = { canlogPaused: false, filter: "", nodes: {}, frames: [] };
 
@@ -138,7 +150,7 @@ function renderStatus(nodes) {
     card.appendChild(kv);
 
     var bits = el("div", "bits");
-    STATUSWORD_BITS.forEach(function (entry) {
+    statuswordBits(snap.mode).forEach(function (entry) {
       var on = ((snap.statusword >> entry[0]) & 1) === 1;
       var chip = el("span", "bit" + (entry[0] === 3 ? " fault" : "") + (on ? " on" : ""),
         entry[0] + " " + entry[1]);

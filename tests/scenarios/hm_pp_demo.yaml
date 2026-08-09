@@ -1,0 +1,27 @@
+name: 原点復帰 (hm) してから pp で往復位置決めする
+nodes: [1]
+steps:
+  - nmt: start
+  # --- 原点復帰 (現在位置を原点にする方式 37) ---
+  - sdo_write: {index: 0x6060, value: 6}
+  - sdo_write: {index: 0x6098, value: 37}
+  - sdo_write: {index: 0x6040, value: 0x0006}
+  - sdo_write: {index: 0x6040, value: 0x0007}
+  - sdo_write: {index: 0x6040, value: 0x000F}
+  - sdo_write: {index: 0x6040, value: 0x001F}   # HOS 0->1
+  - expect: {index: 0x6041, mask: 0x1000, value: 0x1000, timeout: 2.0}   # HA=1
+  - expect: {index: 0x6064, value: 0, tolerance: 2, timeout: 2.0}
+  # --- pp で 2 回転進んで戻る ---
+  - sdo_write: {index: 0x6060, value: 1}
+  - sdo_write: {index: 0x6081, value: 300}
+  - sdo_write: {index: 0x6083, value: 6000}
+  - sdo_write: {index: 0x6084, value: 6000}
+  - sdo_write: {index: 0x607A, value: 7200}
+  - sdo_write: {index: 0x6040, value: 0x000F}
+  - sdo_write: {index: 0x6040, value: 0x001F}
+  - expect: {index: 0x6064, value: 7200, tolerance: 30, timeout: 10.0}
+  - sdo_write: {index: 0x607A, value: 0}
+  - sdo_write: {index: 0x6040, value: 0x000F}
+  - sdo_write: {index: 0x6040, value: 0x001F}
+  - expect: {index: 0x6064, value: 0, tolerance: 30, timeout: 10.0}
+  - expect: {index: 0x6041, mask: 0x0400, value: 0x0400, timeout: 2.0}

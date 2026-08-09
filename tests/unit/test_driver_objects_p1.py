@@ -203,14 +203,16 @@ def test_stub_objects_lists_the_four_unimplemented_objects():
     assert (0x1016, 1) not in stub_keys
     assert (0x409B, 0) in stub_keys
     assert (0x60FE, 1) in stub_keys
-    assert (0x6081, 0) in stub_keys
+    # 6081h は pp モード実装 (P4) で実働になった
+    assert (0x6081, 0) not in stub_keys
     # 1003h (エラー履歴) は実際に機能しているのでスタブではない。
     assert (0x1003, 0) not in stub_keys
     # 最終ブランチレビュー指摘4: 6072h/4032h は値を保持・読み返しできるが
     # MotorPlant が参照しないため運転には効かない。「実装したつもりで
     # 呼ばれない」ことを --list-stubs で機械的に確認できるよう、スタブとして
     # 登録されている（P1 時点ではここが漏れていた）。
-    assert (0x6072, 0) in stub_keys
+    # 6072h は tq モード実装 (P4) で実際にトルク制限として効くようになった
+    assert (0x6072, 0) not in stub_keys
     assert (0x4032, 0) in stub_keys
 
 

@@ -70,13 +70,13 @@ def test_sdo_write_out_of_range_is_acked_as_abort_over_vcan(running_sim, master)
 
 
 def test_sdo_write_unimplemented_mode_is_acked_as_abort_over_vcan(running_sim, master):
-    """6060h に未実装の運転モード (1) を書くと、CAN 経由でも SDO abort が返る。
+    """6060h に未実装の運転モード (2 = vl) を書くと、CAN 経由でも SDO abort が返る。
 
-    6060h の未実装モード検出は P4 まで残る唯一の防壁のため、CAN 越しに
-    黙って握りつぶされてはならない。
+    未実装モードの検出は CAN 越しに黙って握りつぶされてはならない。
+    (pp/pv/tq/hm は実装済みなので、サポート外の vl で確認する)
     """
     node = _remote(master, 1)
     with pytest.raises(canopen.SdoAbortedError) as exc:
-        node.sdo[0x6060].raw = 1
+        node.sdo[0x6060].raw = 2
     assert exc.value.code == ABORT_DEVICE_STATE
     assert running_sim.models[1].read_object(0x6060) == 3  # MODE_PV の既定値

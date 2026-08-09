@@ -36,13 +36,13 @@ def test_mode_display_follows_mode_of_operation():
 def test_unsupported_mode_is_reported_as_not_implemented():
     model = DriverModel(node_id=1)
     with pytest.raises(NotImplementedObjectError) as exc:
-        model.write_object(0x6060, 0, 1)
+        model.write_object(0x6060, 0, 2)   # vl (速度モード) は未実装
     # NotImplementedObjectError は ObjectAccessError のサブクラスなので
     # od_bridge.py の SDO abort への変換対象に入る（生の NotImplementedError
     # は変換対象外で汎用 abort に潰れ、メッセージが消えていた）。
     assert isinstance(exc.value, ObjectAccessError)
     assert exc.value.abort_code == ABORT_DEVICE_STATE
-    assert "1" in str(exc.value)
+    assert "2" in str(exc.value)
 
 
 def test_statusword_shows_operation_enabled():
@@ -290,14 +290,19 @@ def test_quick_stop_ramps_down_and_exits_to_switch_on_disabled():
     assert abs(model.read_object(0x606C)) <= 1
 
 
-def test_quick_stop_option_code_is_stubbed():
+def test_quick_stop_option_code_is_implemented_since_p4():
     keys = set((index, sub) for index, sub, _reason in DriverModel.router.stubs())
-    assert (0x605A, 0) in keys
+    assert (0x605A, 0) not in keys
 
 
-def test_torque_limit_objects_are_stubbed():
+def test_torque_limit_objects_are_partially_implemented():
+    """6072h は tq モードで実際に効くのでスタブから外れた。
+
+    4032h (ダイレクトデータ運転のトルク制限) は tq でも上限として効くが、
+    速度・位置追従には効かないままなのでスタブに残る。
+    """
     keys = set((index, sub) for index, sub, _reason in DriverModel.router.stubs())
-    assert (0x6072, 0) in keys
+    assert (0x6072, 0) not in keys
     assert (0x4032, 0) in keys
 
 

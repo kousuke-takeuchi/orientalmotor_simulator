@@ -172,3 +172,14 @@ def test_motor3d_top_level_vars_do_not_collide_with_window_globals():
     assert not collisions, (
         "motor3d.js のトップレベル var が window の標準プロパティと衝突しています: "
         "{}".format(collisions))
+
+
+def test_app_js_knows_the_mode_specific_statusword_bits():
+    """bit12/13/15 は運転モードで意味が変わる。pv の名前を pp/hm に出さない。"""
+    js = _read("app.js")
+    assert "MODE_SPECIFIC_BITS" in js
+    for name in ("Set point acknowledge (pp)", "Homing attained (hm)",
+                 "Following error (pp)", "Homing error (hm)", "Speed is 0 (pv)"):
+        assert name in js
+    # モード別の表を通さずに固定表を描いていないこと
+    assert "statuswordBits(snap.mode)" in js

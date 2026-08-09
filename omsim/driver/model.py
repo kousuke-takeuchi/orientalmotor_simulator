@@ -23,7 +23,13 @@ from omsim.driver.errors import (
 )
 from omsim.driver.motor_plant import MotorPlant
 from omsim.driver.objects import ObjectRouter
-from omsim.driver.operation import OperationContext, ProfileVelocityMode
+from omsim.driver.operation import (
+    HomingMode,
+    OperationContext,
+    ProfilePositionMode,
+    ProfileTorqueMode,
+    ProfileVelocityMode,
+)
 from omsim.driver.pdo import (
     RPDO_BASE_COB_ID,
     RPDO_TRANSMISSION_TYPES,
@@ -37,6 +43,15 @@ from omsim.driver.pdo import (
 )
 from omsim.driver.profile import TrapezoidProfile
 from omsim.driver.state_machine import Cia402StateMachine, State
+from omsim.driver.stopping import (
+    IMMEDIATE,
+    QUICK_STOP_RAMP,
+    resolve_disable_operation,
+    resolve_fault_reaction,
+    resolve_halt,
+    resolve_quick_stop,
+    resolve_shutdown,
+)
 from omsim.driver.units import UnitConverter
 
 MODE_PV = ProfileVelocityMode.MODE_CODE
@@ -56,6 +71,20 @@ def _clamp_int32(value):
 
 class DriverModel(object):
     """1 台のドライバ。状態は全てインスタンス変数に持つ。"""
+
+    _SHUTDOWN_OPTION_STUB_REASON = (
+        "P4: 605Bh は値の保持のみ。operation-enabled -> ready-to-switch-on の"
+        "遷移は常に即時停止 (= 既定値 0 の挙動) で、1 (slow down ramp) にしても"
+        "挙動は変わらない"
+    )
+    _DISABLE_OPERATION_OPTION_STUB_REASON = (
+        "P4: 605Ch は値の保持のみ。operation-enabled -> switched-on の遷移は"
+        "常に即時停止で、既定値 1 (slow down ramp) の挙動になっていない"
+    )
+    _FAULT_REACTION_OPTION_STUB_REASON = (
+        "P4: 605Eh は値の保持のみ。アラーム検出時の停止は常に即時停止で、"
+        "既定値 2 (6085h のランプで減速) の挙動になっていない"
+    )
 
     router = ObjectRouter()
 
@@ -89,11 +118,48 @@ class DriverModel(object):
         self.direct_torque_limit_permille = 10000
         self.digital_outputs = 0
         self.profile_velocity_rpm = 1
+        # hm (Homing) 用。既定値は EDS 実測 (6098h=37 / 6099h=60,30 / 609Ah=1000)
+        self.homing_method = 37
+        self.homing_speed_switch_rpm = 60
+        self.homing_speed_zero_rpm = 30
+        self.homing_acceleration_rpm_s = 1000
+        self.home_offset = 0
+        self.homing_completed = False
+        # CN4 のリミット/HOME センサ入力 (実配線は P5)
+        self.limit_inputs = {"fw_ls": False, "rv_ls": False, "home": False}
+        # touch probe (60B8h-60BDh / 60D5h-60D8h)。既定 3131h は EDS 実測。
+        self.touch_probe_function = 0x3131
+        # probe -> {"positive": 値 or None, "negative": ..., カウンタ}
+        self.touch_probe_values = {
+            1: {"positive": None, "negative": None},
+            2: {"positive": None, "negative": None},
+        }
+        self.touch_probe_counters = {
+            1: {"positive": 0, "negative": 0},
+            2: {"positive": 0, "negative": 0},
+        }
+
+        # 607Dh Software position limit
+        self.software_min_position = 0
+        self.software_max_position = 0
+
+        # tq (Profile Torque) 用
+        self.target_torque = 0
+        self.torque_slope = 0
+        # pp (Profile Position) 用
+        self.target_position = 0
+        self.end_velocity = 0
+        self.positioning_option_code = 0
         self.consumer_heartbeat_config = 0
         self.producer_heartbeat_config = 0
-        # 605Ah Quick stop option code: 未実装 (P5)。値は保持するのみで、
-        # 挙動には反映しない（常に既定の「減速完了で switch-on-disabled」）。
+        # 停止動作の option code (HP-5143E 605Ah-605Eh 実測の既定値)。
         self.quick_stop_option_code = 2
+        self.shutdown_option_code = 0
+        self.disable_operation_option_code = 1
+        self.halt_option_code = 1
+        self.fault_reaction_option_code = 2
+        # 6085h Quick stop deceleration。既定は通常の減速度と同じにしておく。
+        self.quick_stop_deceleration_rpm_s = 1000.0
 
         # PDO 通信パラメータ (1400h-1403h / 1800h-1803h)。既定値は EDS 実測。
         self.rpdo_comm = [
@@ -162,6 +228,8 @@ class DriverModel(object):
         # 40D0h (Clear ETO) の writer が hwto を書き換えるため必須。
         # 漏らすと SDO 受信時の検証だけで実機の ETO が解除される。
         "hwto",
+        # 60B8h の writer は probe 無効化時にラッチ値とカウンタを捨てる。
+        "touch_probe_values", "touch_probe_counters",
     )
 
     def _shadow(self):
@@ -232,17 +300,101 @@ class DriverModel(object):
 
         # HP-5143E 6.2 (p35) Transition 12: quick-stop-active はクイック
         # ストップの減速完了 (指令・実速度ともに 0 付近) で switch-on-disabled
-        # へ自動的に抜ける。605Ah Quick stop option code は未実装 (P5) の
-        # ため、常にこの既定動作のみを行う。
+        # へ抜ける。抜けるかどうかと減速のしかたは 605Ah で決まる。
         if self.state_machine.state == State.QUICK_STOP_ACTIVE:
+            action = resolve_quick_stop(self.quick_stop_option_code)
+            if action.kind == IMMEDIATE:
+                self.profile.reset(0.0)
+                self.plant.velocity = 0.0
             stopped = (
                 self.profile.command == 0.0
                 and abs(self.actual_velocity_rpm) <= self.velocity_threshold_rpm
             )
-            if stopped:
+            if stopped and not action.stay_in_state:
                 self.state_machine.stop_completed()
 
         self._check_heartbeat_consumer()
+        self._apply_travel_limits()
+
+    @property
+    def effective_deceleration_rpm_s(self):
+        """今この瞬間に使う減速度。
+
+        通常は 6084h。quick-stop-active の間だけ 605Ah の option code に
+        従い、quick stop ramp なら 6085h を使う。運転モード側はこの値を
+        参照する (モードごとに同じ分岐を書かないため)。
+        """
+        if self.state_machine.state != State.QUICK_STOP_ACTIVE:
+            return self.profile_deceleration_rpm_s
+        action = resolve_quick_stop(self.quick_stop_option_code)
+        if action.kind == QUICK_STOP_RAMP:
+            return self.quick_stop_deceleration_rpm_s
+        return self.profile_deceleration_rpm_s
+
+    # --- 停止動作の option code (605Ah-605Eh) と 6085h ---
+
+    @router.reader(0x605A)
+    def _read_quick_stop_option_code(self, sub):
+        return self.quick_stop_option_code
+
+    @router.writer(0x605A)
+    def _write_quick_stop_option_code(self, sub, value):
+        code = int(value)
+        if code in (-3, -2):
+            # 4735h Custom stopping rate / 4736h Custom stopping time は
+            # 値を保持しているだけで単位が未確認 (P5 でアドレスコード表から
+            # 確定させる)。挙動を推測で作らず、明示的に拒否する。
+            raise ObjectAccessError(
+                ABORT_VALUE_RANGE,
+                "605Ah の {} (4735h/4736h によるカスタム停止) は未対応です".format(code))
+        resolve_quick_stop(code)   # 範囲外はここで abort
+        self.quick_stop_option_code = code
+
+    @router.reader(0x605B)
+    def _read_shutdown_option_code(self, sub):
+        return self.shutdown_option_code
+
+    @router.writer(0x605B, stub=_SHUTDOWN_OPTION_STUB_REASON)
+    def _write_shutdown_option_code(self, sub, value):
+        resolve_shutdown(value)
+        self.shutdown_option_code = int(value)
+
+    @router.reader(0x605C)
+    def _read_disable_operation_option_code(self, sub):
+        return self.disable_operation_option_code
+
+    @router.writer(0x605C, stub=_DISABLE_OPERATION_OPTION_STUB_REASON)
+    def _write_disable_operation_option_code(self, sub, value):
+        resolve_disable_operation(value)
+        self.disable_operation_option_code = int(value)
+
+    @router.reader(0x605D)
+    def _read_halt_option_code(self, sub):
+        return self.halt_option_code
+
+    @router.writer(0x605D)
+    def _write_halt_option_code(self, sub, value):
+        resolve_halt(value)   # 0 は仕様上 Reserved なので abort
+        self.halt_option_code = int(value)
+
+    @router.reader(0x605E)
+    def _read_fault_reaction_option_code(self, sub):
+        return self.fault_reaction_option_code
+
+    @router.writer(0x605E, stub=_FAULT_REACTION_OPTION_STUB_REASON)
+    def _write_fault_reaction_option_code(self, sub, value):
+        resolve_fault_reaction(value)
+        self.fault_reaction_option_code = int(value)
+
+    @router.reader(0x6085)
+    def _read_quick_stop_deceleration(self, sub):
+        return int(self.quick_stop_deceleration_rpm_s)
+
+    @router.writer(0x6085)
+    def _write_quick_stop_deceleration(self, sub, value):
+        if int(value) <= 0:
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6085h は 1 以上")
+        self.quick_stop_deceleration_rpm_s = float(value)
 
     # --- HWTO (動力遮断機能) ---
 
@@ -293,6 +445,12 @@ class DriverModel(object):
         # HP-5143E 60FDh 実測: bit0 NLS / bit1 PLS / bit2 HS / bit3 HWTO /
         # bit16-31 R-OUT。リミットセンサとリモート出力は P4 以降のため 0。
         value = 0
+        if self.limit_inputs["rv_ls"]:
+            value |= 1 << 0   # NLS: Negative limit switch
+        if self.limit_inputs["fw_ls"]:
+            value |= 1 << 1   # PLS: Positive limit switch
+        if self.limit_inputs["home"]:
+            value |= 1 << 2   # HS: Home switch
         if self.hwto.hwtoin_mon:
             value |= 1 << 3
         return value
@@ -320,7 +478,13 @@ class DriverModel(object):
         を観測するテストのため）。step() と _write_controlword() の両方
         から呼ばれる共通処理。
         """
-        excited = self.state_machine.is_operation_enabled
+        # quick-stop-active の間もドライバは励磁したままクイックストップの
+        # 減速を実行する (HP-5143E 6.2 の遷移 11: 「The Quick Stop function is
+        # executed」)。ここを励磁 OFF にすると、605Ah で指定した減速ランプが
+        # 効かず惰走になってしまう。
+        excited = (
+            self.state_machine.is_operation_enabled
+            or self.state_machine.state == State.QUICK_STOP_ACTIVE)
         self.plant.excited = excited
         return excited
 
@@ -436,15 +600,25 @@ class DriverModel(object):
     def _read_mode(self, sub):
         return self.mode
 
+    _OPERATION_MODES = {
+        MODE_PV: ProfileVelocityMode,
+        MODE_PP: ProfilePositionMode,
+        MODE_TQ: ProfileTorqueMode,
+        MODE_HM: HomingMode,
+    }
+
     @router.writer(0x6060)
     def _write_mode(self, sub, value):
         mode = int(value)
-        if mode != MODE_PV:
+        factory = self._OPERATION_MODES.get(mode)
+        if factory is None:
             raise NotImplementedObjectError(
                 ABORT_DEVICE_STATE,
-                "運転モード {} は未実装 (P4 で実装予定, 6060h)".format(mode))
+                "運転モード {} は未実装 (tq/hm は P4 の後続タスク, 6060h)".format(mode))
+        if mode == self.mode:
+            return
         self.mode = mode
-        self.operation = ProfileVelocityMode()
+        self.operation = factory()
 
     @router.reader(0x6061)
     def _read_mode_display(self, sub):
@@ -487,15 +661,15 @@ class DriverModel(object):
         return _clamp_int32(round(self.plant.torque_permille))
 
     _TORQUE_LIMIT_STUB_REASON = (
-        "P4/P5: 値は保持・読み返しできるが MotorPlant がトルク制限を"
-        "一切参照しないため、運転(速度追従)には効かない"
+        "P5: tq (トルク) モードではトルク制限として実際に効くが、pv / pp の"
+        "速度・位置追従では MotorPlant がトルク制限を参照しないため効かない"
     )
 
-    @router.reader(0x6072, stub=_TORQUE_LIMIT_STUB_REASON)
+    @router.reader(0x6072)
     def _read_max_torque(self, sub):
         return self.max_torque_permille
 
-    @router.writer(0x6072, stub=_TORQUE_LIMIT_STUB_REASON)
+    @router.writer(0x6072)
     def _write_max_torque(self, sub, value):
         # EDS: LowLimit=0 HighLimit=10000 (千分率、1000 = 定格トルク)
         if not (0 <= int(value) <= 10000):
@@ -554,11 +728,358 @@ class DriverModel(object):
     def _read_main_power_current(self, sub):
         return 0
 
-    @router.reader(0x6081, stub="P4: pp (プロファイル位置) モード未実装。値の保持のみ")
+    def _limit_window(self):
+        """(下限, 上限) を返す。無効なら None。
+
+        HP-5143E 607Dh 実測: 「Corrected limit = limit - Home offset」で
+        補正した値と実位置を比べる。
+        """
+        if not self.software_limits_active:
+            return None
+        return (self.software_min_position - self.home_offset,
+                self.software_max_position - self.home_offset)
+
+    def _blocked_direction(self):
+        """止めるべき方向を返す (+1 / -1 / 0)。
+
+        リミットセンサ (FW-LS / RV-LS) とソフトウェアリミットの両方を見る。
+        センサに当たっていても反対方向へは動けること (HP-5141J の一般的な
+        リミット動作) を守るため、方向つきで返す。
+        """
+        blocked = 0
+        if self.limit_inputs["fw_ls"]:
+            blocked = +1
+        if self.limit_inputs["rv_ls"]:
+            blocked = -1 if blocked == 0 else blocked
+        window = self._limit_window()
+        if window is not None:
+            position = int(self.plant.position)
+            if position >= window[1]:
+                blocked = +1
+            elif position <= window[0]:
+                blocked = -1
+        return blocked
+
+    def _apply_travel_limits(self):
+        """リミットに当たっていたら、その方向の動きだけを止める。"""
+        blocked = self._blocked_direction()
+        self.state_machine.internal_limit_active = blocked != 0
+        if blocked == 0:
+            return
+        velocity = self.plant.velocity
+        if (blocked > 0 and velocity > 0) or (blocked < 0 and velocity < 0):
+            self.plant.velocity = 0.0
+            self.profile.reset(0.0)
+        window = self._limit_window()
+        if window is None:
+            return
+        # ソフトウェアリミットは位置そのものが境界を越えないよう押し戻す。
+        # 速度を 0 にするだけだと、毎周期わずかに動いては止められて、
+        # 境界の外へじりじり進んでしまう (実測で 3000 周期に 57 increment)。
+        position = int(self.plant.position)
+        if position > window[1]:
+            self.plant.preset_position(window[1])
+        elif position < window[0]:
+            self.plant.preset_position(window[0])
+
+    # --- touch probe (60B8h-60BDh / 60D5h-60D8h) ---
+
+    _PROBE_BITS = {
+        # probe: (有効化, 連続, トリガ源 ZSG, 正エッジ, 負エッジ, status 基準ビット)
+        1: (0, 1, 2, 4, 5, 0),
+        2: (8, 9, 10, 12, 13, 8),
+    }
+
+    def _probe_flag(self, probe, which):
+        bits = self._PROBE_BITS[probe]
+        index = {"enable": 0, "continuous": 1, "zsg": 2,
+                 "positive": 3, "negative": 4}[which]
+        return bool(self.touch_probe_function & (1 << bits[index]))
+
+    def trigger_touch_probe(self, probe, edge):
+        """probe 入力 (USR-LAT-IN0/1) のエッジを伝える。
+
+        CN4 の実際の入力割付は P5。ここは「エッジが来た」という事実だけを
+        受ける内部 API。
+        """
+        if probe not in self._PROBE_BITS:
+            raise ValueError("touch probe は 1 か 2 です: {}".format(probe))
+        if edge not in ("positive", "negative"):
+            raise ValueError("edge は positive か negative です: {}".format(edge))
+        if not self._probe_flag(probe, "enable"):
+            return
+        if not self._probe_flag(probe, edge):
+            return
+        stored = self.touch_probe_values[probe][edge]
+        if stored is not None and not self._probe_flag(probe, "continuous"):
+            # 単発モードは最初のイベントだけを保持する
+            return
+        self.touch_probe_values[probe][edge] = int(self.plant.position)
+        self.touch_probe_counters[probe][edge] += 1
+
+    @router.reader(0x60B8)
+    def _read_touch_probe_function(self, sub):
+        return self.touch_probe_function
+
+    @router.writer(0x60B8)
+    def _write_touch_probe_function(self, sub, value):
+        raw = int(value) & 0xFFFF
+        for probe, bits in self._PROBE_BITS.items():
+            if raw & (1 << bits[2]):
+                raise NotImplementedObjectError(
+                    ABORT_VALUE_RANGE,
+                    "60B8h: probe{} の ZSG-N トリガ源は未実装 "
+                    "(index pulse のモデルが無い)".format(probe))
+        was_enabled = dict(
+            (probe, self._probe_flag(probe, "enable")) for probe in self._PROBE_BITS)
+        self.touch_probe_function = raw
+        for probe in self._PROBE_BITS:
+            if was_enabled[probe] and not self._probe_flag(probe, "enable"):
+                # 無効化したら保持値とカウンタを捨てる (status も落ちる)
+                self.touch_probe_values[probe] = {"positive": None, "negative": None}
+                self.touch_probe_counters[probe] = {"positive": 0, "negative": 0}
+
+    @router.reader(0x60B9)
+    def _read_touch_probe_status(self, sub):
+        value = 0
+        for probe, bits in self._PROBE_BITS.items():
+            base = bits[5]
+            if self._probe_flag(probe, "enable"):
+                value |= 1 << base
+            if self.touch_probe_values[probe]["positive"] is not None:
+                value |= 1 << (base + 1)
+            if self.touch_probe_values[probe]["negative"] is not None:
+                value |= 1 << (base + 2)
+        return value
+
+    def _probe_value(self, probe, edge):
+        stored = self.touch_probe_values[probe][edge]
+        return _clamp_int32(stored if stored is not None else 0)
+
+    @router.reader(0x60BA)
+    def _read_probe1_positive(self, sub):
+        return self._probe_value(1, "positive")
+
+    @router.reader(0x60BB)
+    def _read_probe1_negative(self, sub):
+        return self._probe_value(1, "negative")
+
+    @router.reader(0x60BC)
+    def _read_probe2_positive(self, sub):
+        return self._probe_value(2, "positive")
+
+    @router.reader(0x60BD)
+    def _read_probe2_negative(self, sub):
+        return self._probe_value(2, "negative")
+
+    @router.reader(0x60D5)
+    def _read_probe1_positive_counter(self, sub):
+        return self.touch_probe_counters[1]["positive"]
+
+    @router.reader(0x60D6)
+    def _read_probe1_negative_counter(self, sub):
+        return self.touch_probe_counters[1]["negative"]
+
+    @router.reader(0x60D7)
+    def _read_probe2_positive_counter(self, sub):
+        return self.touch_probe_counters[2]["positive"]
+
+    @router.reader(0x60D8)
+    def _read_probe2_negative_counter(self, sub):
+        return self.touch_probe_counters[2]["negative"]
+
+    # --- hm (Homing) と原点まわり ---
+
+    def set_limit_inputs(self, fw_ls=None, rv_ls=None, home=None):
+        """CN4 のリミット / HOME センサ入力を伝える (実配線は P5)。"""
+        for name, value in (("fw_ls", fw_ls), ("rv_ls", rv_ls), ("home", home)):
+            if value is not None:
+                self.limit_inputs[name] = bool(value)
+
+    def on_homing_completed(self):
+        """HomingMode から呼ばれる。原点復帰完了でソフトリミットが有効になる。"""
+        self.homing_completed = True
+
+    @property
+    def homing_backward_steps(self):
+        """4169h (HOME) 2 センサ原点復帰の戻りステップ数。未設定なら 0。"""
+        value = self.passthrough_values.get((0x4169, 0))
+        return int(value) if value is not None else 0
+
+    @property
+    def software_limits_active(self):
+        """607Dh が効いているか。
+
+        HP-5143E 607Dh 実測: 有効になるのは原点復帰完了後。Min >= Max、または
+        Min/Max がともに 0 のときは無効。
+        """
+        if not self.homing_completed:
+            return False
+        if self.software_min_position == 0 and self.software_max_position == 0:
+            return False
+        return self.software_min_position < self.software_max_position
+
+    _UNSUPPORTED_HOMING_METHODS = (1, 2, 8, 12, -1)
+
+    @router.reader(0x6098)
+    def _read_homing_method(self, sub):
+        return self.homing_method
+
+    @router.writer(0x6098)
+    def _write_homing_method(self, sub, value):
+        method = int(value)
+        if not (-1 <= method <= 37):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6098h は -1〜37")
+        if method in self._UNSUPPORTED_HOMING_METHODS:
+            raise NotImplementedObjectError(
+                ABORT_VALUE_RANGE,
+                "6098h の方式 {} は未実装 (index pulse (ZSG-N) / メーカ固有)".format(method))
+        if method not in HomingMode.SEARCH and method not in HomingMode.CURRENT_POSITION_METHODS:
+            raise NotImplementedObjectError(
+                ABORT_VALUE_RANGE, "6098h の方式 {} は未実装".format(method))
+        self.homing_method = method
+
+    @router.reader(0x6099, 0)
+    def _read_homing_speeds_count(self, sub):
+        return 2
+
+    @router.reader(0x6099, 1)
+    def _read_homing_speed_switch(self, sub):
+        return int(self.homing_speed_switch_rpm)
+
+    @router.writer(0x6099, 1)
+    def _write_homing_speed_switch(self, sub, value):
+        if not (1 <= int(value) <= 4000000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6099h:01 は 1〜4,000,000")
+        self.homing_speed_switch_rpm = int(value)
+
+    @router.reader(0x6099, 2)
+    def _read_homing_speed_zero(self, sub):
+        return int(self.homing_speed_zero_rpm)
+
+    @router.writer(0x6099, 2)
+    def _write_homing_speed_zero(self, sub, value):
+        if not (1 <= int(value) <= 4000000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6099h:02 は 1〜4,000,000")
+        self.homing_speed_zero_rpm = int(value)
+
+    @router.reader(0x609A)
+    def _read_homing_acceleration(self, sub):
+        return int(self.homing_acceleration_rpm_s)
+
+    @router.writer(0x609A)
+    def _write_homing_acceleration(self, sub, value):
+        if int(value) <= 0:
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "609Ah は 1 以上")
+        self.homing_acceleration_rpm_s = int(value)
+
+    @router.reader(0x607C)
+    def _read_home_offset(self, sub):
+        return _clamp_int32(self.home_offset)
+
+    @router.writer(0x607C)
+    def _write_home_offset(self, sub, value):
+        self.home_offset = _clamp_int32(value)
+
+    @router.reader(0x607D, 0)
+    def _read_software_limit_count(self, sub):
+        return 2
+
+    @router.reader(0x607D, 1)
+    def _read_software_min_position(self, sub):
+        return _clamp_int32(self.software_min_position)
+
+    @router.writer(0x607D, 1)
+    def _write_software_min_position(self, sub, value):
+        self.software_min_position = _clamp_int32(value)
+
+    @router.reader(0x607D, 2)
+    def _read_software_max_position(self, sub):
+        return _clamp_int32(self.software_max_position)
+
+    @router.writer(0x607D, 2)
+    def _write_software_max_position(self, sub, value):
+        self.software_max_position = _clamp_int32(value)
+
+    @router.reader(0x6071)
+    def _read_target_torque(self, sub):
+        return self.target_torque
+
+    @router.writer(0x6071)
+    def _write_target_torque(self, sub, value):
+        # EDS/HP-5143E: -1000..1000 (0.1% 単位)
+        if not (-1000 <= int(value) <= 1000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6071h は -1000〜1000")
+        self.target_torque = int(value)
+
+    @router.reader(0x6074)
+    def _read_torque_demand(self, sub):
+        demand = getattr(self.operation, "torque_demand", None)
+        # tq 以外のモードでは要求トルクという概念が無いので実トルクを返す。
+        if demand is None:
+            return _clamp_int32(round(self.plant.torque_permille))
+        return demand
+
+    @router.reader(0x6087)
+    def _read_torque_slope(self, sub):
+        return self.torque_slope
+
+    @router.writer(0x6087)
+    def _write_torque_slope(self, sub, value):
+        if not (0 <= int(value) <= 1000000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6087h は 0〜1,000,000")
+        self.torque_slope = int(value)
+
+    @router.reader(0x607A)
+    def _read_target_position(self, sub):
+        return _clamp_int32(self.target_position)
+
+    @router.writer(0x607A)
+    def _write_target_position(self, sub, value):
+        self.target_position = _clamp_int32(value)
+
+    @router.reader(0x6082)
+    def _read_end_velocity(self, sub):
+        return int(self.end_velocity)
+
+    @router.writer(0x6082)
+    def _write_end_velocity(self, sub, value):
+        # 6082h は「加速終了時の速度」ではなく位置決め終了時の速度。0 以外は
+        # 未対応。黙って 0 として動かすと「設定したのに効かない」嘘になるため
+        # 明示的に拒否する。
+        if int(value) != 0:
+            raise ObjectAccessError(
+                ABORT_VALUE_RANGE, "6082h は 0 以外未対応 (位置決めは必ず停止で終わる)")
+        self.end_velocity = 0
+
+    _POSITIONING_OPTION_SUPPORTED_MASK = 0x00C3   # bit0-1 (RO) と bit6-7 (RADO)
+
+    @router.reader(0x60F2)
+    def _read_positioning_option_code(self, sub):
+        return self.positioning_option_code
+
+    @router.writer(0x60F2)
+    def _write_positioning_option_code(self, sub, value):
+        raw = int(value) & 0xFFFF
+        # HP-5143E 7.3.6 実測: Change immediately option (bit2-3) /
+        # Request-response option (bit4-5) / IP option (bit8-11) は
+        # 「Not supported」。立てられたら abort する。
+        if raw & ~self._POSITIONING_OPTION_SUPPORTED_MASK:
+            raise ObjectAccessError(
+                ABORT_VALUE_RANGE,
+                "60F2h の {:04X}h には未サポートのオプションが含まれています".format(raw))
+        if raw:
+            raise NotImplementedObjectError(
+                ABORT_VALUE_RANGE,
+                "60F2h: Relative option / Rotary axis direction option は"
+                "値 0 (既定) のみ実装 (P4 の後続タスク)")
+        self.positioning_option_code = raw
+
+    @router.reader(0x6081)
     def _read_profile_velocity(self, sub):
         return int(self.profile_velocity_rpm)
 
-    @router.writer(0x6081, stub="P4: pp (プロファイル位置) モード未実装。値の保持のみ")
+    @router.writer(0x6081)
     def _write_profile_velocity(self, sub, value):
         if int(value) < 0:
             raise ObjectAccessError(ABORT_VALUE_RANGE, "6081h は 0 以上")
@@ -661,20 +1182,6 @@ class DriverModel(object):
         if int(value) <= 0:
             raise ObjectAccessError(ABORT_VALUE_RANGE, "6084h は 1 以上")
         self.profile_deceleration_rpm_s = float(value)
-
-    _QUICK_STOP_OPTION_STUB_REASON = (
-        "P5: Quick stop option code 未実装。605Ah の値によらず、常に通常の"
-        "減速度 (6084h) でクイックストップし、停止完了で switch-on-disabled "
-        "へ抜ける既定動作のみを行う（6085h Quick stop deceleration も未実装）"
-    )
-
-    @router.reader(0x605A, stub=_QUICK_STOP_OPTION_STUB_REASON)
-    def _read_quick_stop_option_code(self, sub):
-        return self.quick_stop_option_code
-
-    @router.writer(0x605A, stub=_QUICK_STOP_OPTION_STUB_REASON)
-    def _write_quick_stop_option_code(self, sub, value):
-        self.quick_stop_option_code = int(value)
 
     @router.reader(0x608F, 1)
     def _read_encoder_increments(self, sub):
