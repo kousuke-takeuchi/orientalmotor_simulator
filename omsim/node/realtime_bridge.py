@@ -154,6 +154,7 @@ class RealtimeBridge(object):
         self._listeners = {}
         self._tpdo_runtime = {}  # node_id -> [runtime_slot0..3]
         self._sync_producer = {}  # node_id -> _SyncProducerState
+        self._sync_counters = {}  # node_id -> SyncCounter
 
     def _make_listener(self, node, model, od, queue, sync_counter):
         return _NodeListener(node, model, od, queue, sync_counter)
@@ -167,6 +168,7 @@ class RealtimeBridge(object):
         self._listeners[model.node_id] = listener
         self._tpdo_runtime[model.node_id] = self._make_tpdo_runtime()
         self._sync_producer[model.node_id] = _SyncProducerState()
+        self._sync_counters[model.node_id] = sync_counter
         network = node.network
         network.listeners.append(listener)
         notifier = getattr(network, "notifier", None)
@@ -219,6 +221,12 @@ class RealtimeBridge(object):
         if sim_time >= state.next_due:
             network.send_message(model.sync_cob_id & 0x7FF, [])
             state.next_due = sim_time + period_seconds
+            # SocketCAN は自分の送信を受信側へ返さないため、producer 側の
+            # listener には自分の SYNC が届かない。自分でも消費しないと
+            # 「SYNC を出しているのに自分の同期 PDO が動かない」ことになる。
+            own_counter = self._sync_counters.get(node_id)
+            if own_counter is not None:
+                own_counter.notify()
 
     def step(self, node_id, model, network, od, sim_time):
         """1ms ごとに呼ぶ: SYNC producer と、非同期系 TPDO (0xFE/0xFF) の

@@ -210,3 +210,24 @@ def test_malformed_rpdo_frame_does_not_escape_the_listener():
     msg = can.Message(arbitration_id=0x301, data=[0x0F], is_extended_id=False)
     listener.on_message_received(msg)  # 例外が出ないこと
     assert queue.pending_count() == 0
+
+
+def test_sync_producer_also_feeds_its_own_sync_consumer():
+    """自分が SYNC producer のとき、自分の SYNC も自分で消費する。
+
+    SocketCAN は自分の送信を受信側へ返さないため、producer 側の
+    listener には自分の SYNC が届かない。何もしないと「SYNC を出して
+    いるのに自分の同期 TPDO/RPDO が一切動かない」状態になる。
+    """
+    od = load_eds(DEFAULT_EDS_PATH)
+    model = DriverModel(node_id=1)
+    sync_counter = SyncCounter()
+    bridge = RealtimeBridge()
+    bridge._tpdo_runtime[1] = bridge._make_tpdo_runtime()
+    bridge._sync_counters[1] = sync_counter
+    model.write_object(0x1005, 0, 0x80 | (1 << 30))
+    model.write_object(0x1006, 0, 5000)
+    network = FakeNetwork()
+    bridge.step(1, model, network, od, sim_time=0.0)
+    assert any(cob_id == 0x80 for cob_id, _data in network.sent)
+    assert sync_counter.take() == 1
