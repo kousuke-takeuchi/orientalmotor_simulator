@@ -322,9 +322,20 @@ class DriverModel(object):
             if stopped and not action.stay_in_state:
                 self.state_machine.stop_completed()
 
+        self._apply_remote_inputs()
         self._step_direct_data(dt)
         self._check_heartbeat_consumer()
         self._apply_travel_limits()
+
+    @property
+    def effective_target_velocity_rpm(self):
+        """今この瞬間の速度指令。STOP 入力 (R-IN5) が入っていれば 0。
+
+        運転モード側はこの値を参照する (モードごとに同じ分岐を書かないため)。
+        """
+        if self._remote_input(self.R_IN_STOP):
+            return 0.0
+        return self.target_velocity_rpm
 
     @property
     def effective_deceleration_rpm_s(self):
@@ -425,8 +436,10 @@ class DriverModel(object):
         # 落とせば、既存の遷移ロジックがそのまま使える。
         # 両方の入力が OFF になって ETO 状態に入った場合は、入力が戻っても
         # ETO-CLR (40D0h) で解除するまで無励磁のまま (HP-5141J p204)。
+        # FREE 入力 (R-IN6) も励磁を落とす。HWTO と同じ「電圧無効」の扱い。
         self.state_machine.voltage_enabled = not (
-            self.hwto.power_cut or self.hwto.eto_active)
+            self.hwto.power_cut or self.hwto.eto_active
+            or self._remote_input(self.R_IN_FREE))
 
         alarm = self.hwto.take_pending_alarm()
         if alarm == "circuit":
@@ -686,13 +699,86 @@ class DriverModel(object):
             raise ObjectAccessError(ABORT_VALUE_RANGE, "6072h は 0-10000")
         self.max_torque_permille = int(value)
 
-    @router.reader(0x60FE, 1, stub="P5: HWTO/デジタル出力の意味付け未実装（値の保持のみ）")
+    # --- リモート I/O (60FEh:01 = 403Eh、60FDh bit16-31 = 403Fh) ---
+    #
+    # HP-5143E 60FDh/60FEh 実測のビット割付 (既定機能):
+    #   R-IN0..15  (bit16-31 of 60FEh:01 / 403Eh)
+    #     S-ON / PLOOP-MODE / TRQ-LMT / CLR / QSTOP / STOP / FREE / ALM-RST /
+    #     D-SEL0..7
+    #   R-OUT0..15 (bit16-31 of 60FDh / 403Fh)
+    #     SON-MON / PLOOP-MON / TRQ-LMTD / RDY-DD-OPE / ABSPEN / STOP_R /
+    #     FREE_R / ALM-A / SYS-BSY / IN-POS / RDY-HOME-OPE / RDY-FWRV-OPE /
+    #     RDY-SD-OPE / MOVE / VA / TLC
+    # 機能割付の変更 (DIN/DOUT/R-I/O 機能選択パラメータ) は未実装で、
+    # 既定割付のみを扱う。
+
+    R_IO_BASE_BIT = 16
+
+    R_IN_S_ON = 0
+    R_IN_CLR = 3
+    R_IN_QSTOP = 4
+    R_IN_STOP = 5
+    R_IN_FREE = 6
+    R_IN_ALM_RST = 7
+
+    R_OUT_SON_MON = 0
+    R_OUT_TRQ_LMTD = 2
+    R_OUT_ALM_A = 7
+    R_OUT_MOVE = 13
+    R_OUT_VA = 14
+    R_OUT_TLC = 15
+
+    def _remote_input(self, bit):
+        return bool(self.digital_outputs & (1 << (self.R_IO_BASE_BIT + bit)))
+
+    @router.reader(0x60FE, 1)
     def _read_digital_outputs(self, sub):
         return self.digital_outputs
 
-    @router.writer(0x60FE, 1, stub="P5: HWTO/デジタル出力の意味付け未実装（値の保持のみ）")
+    @router.writer(0x60FE, 1)
     def _write_digital_outputs(self, sub, value):
         self.digital_outputs = int(value) & 0xFFFFFFFF
+
+    @router.reader(0x403E)
+    def _read_driver_input_command(self, sub):
+        # 60FEh:01 と同じレジスタ (R-IN の入力ビット)
+        return self.digital_outputs
+
+    @router.writer(0x403E)
+    def _write_driver_input_command(self, sub, value):
+        self.digital_outputs = int(value) & 0xFFFFFFFF
+
+    @router.reader(0x403F)
+    def _read_driver_output_status(self, sub):
+        value = 0
+        base = self.R_IO_BASE_BIT
+        if self.plant.excited:
+            value |= 1 << (base + self.R_OUT_SON_MON)
+        if self.alarms.is_active:
+            value |= 1 << (base + self.R_OUT_ALM_A)
+        if abs(self.actual_velocity_rpm) > self.velocity_threshold_rpm:
+            value |= 1 << (base + self.R_OUT_MOVE)
+        if self.state_machine.target_reached:
+            value |= 1 << (base + self.R_OUT_VA)
+        if self.state_machine.torque_limit_active:
+            value |= 1 << (base + self.R_OUT_TLC)
+            value |= 1 << (base + self.R_OUT_TRQ_LMTD)
+        return value
+
+    def _apply_remote_inputs(self):
+        """R-IN の入力をドライバの挙動へ反映する。
+
+        FREE は励磁を落として自由回転、STOP は減速停止、QSTOP はクイック
+        ストップ、CLR は位置偏差クリア。STOP / QSTOP / CLR は Statusword
+        bit11 (Internal limit active) を立てる (HP-5143E 7.3.4 実測)。
+        """
+        if self._remote_input(self.R_IN_QSTOP):
+            self.state_machine.write_controlword(
+                (self.state_machine.controlword & ~0x0004) | 0x0002)
+        self._remote_input_limit = (
+            self._remote_input(self.R_IN_STOP)
+            or self._remote_input(self.R_IN_QSTOP)
+            or self._remote_input(self.R_IN_CLR))
 
     @router.reader(0x1003, 0)
     def _read_error_field_count(self, sub):
@@ -773,7 +859,8 @@ class DriverModel(object):
     def _apply_travel_limits(self):
         """リミットに当たっていたら、その方向の動きだけを止める。"""
         blocked = self._blocked_direction()
-        self.state_machine.internal_limit_active = blocked != 0
+        self.state_machine.internal_limit_active = (
+            blocked != 0 or getattr(self, "_remote_input_limit", False))
         if blocked == 0:
             return
         velocity = self.plant.velocity
