@@ -10,7 +10,7 @@ import os
 import threading
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -58,6 +58,11 @@ def create_app(hub):
     @app.get("/")
     def get_index():
         return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+    @app.get("/favicon.ico")
+    def get_favicon():
+        # ファビコンは持たない。204 を返してブラウザの 404 ノイズだけ消す。
+        return Response(status_code=204)
 
     @app.websocket("/ws")
     async def websocket_state(socket: WebSocket):

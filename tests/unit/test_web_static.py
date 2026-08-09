@@ -1,4 +1,5 @@
 import os
+import re
 
 STATIC_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -96,3 +97,44 @@ def test_app_js_can_log_pause_is_separate_from_the_global_pause_flag():
     onmessage_start = js.index("socket.onmessage")
     onmessage_body = js[onmessage_start:js.index("};", onmessage_start)]
     assert "state.paused" not in onmessage_body
+
+
+# ブラウザの window が持つ標準プロパティ。トップレベルの `var` でこれらと
+# 同名の変数を宣言すると、ブラウザでは「window.<name> に代入」になる。
+# 読み取り専用の getter しか持たないもの (history など) だと、代入時に
+# TypeError が飛んで app.js の実行がそこで止まる。
+DANGEROUS_WINDOW_GLOBALS = frozenset(
+    [
+        "name",
+        "status",
+        "length",
+        "top",
+        "parent",
+        "self",
+        "closed",
+        "origin",
+        "location",
+        "frames",
+        "screen",
+        "history",
+        "navigator",
+        "document",
+        "window",
+    ]
+)
+
+
+def test_app_js_top_level_vars_do_not_collide_with_window_globals():
+    js = _read("app.js")
+    top_level_var_names = re.findall(r"(?m)^var\s+([A-Za-z_$][\w$]*)", js)
+    assert top_level_var_names, "app.js からトップレベルの var 宣言が見つかりませんでした"
+
+    collisions = sorted(
+        set(top_level_var_names) & DANGEROUS_WINDOW_GLOBALS
+    )
+    assert not collisions, (
+        "app.js のトップレベル var が window の標準プロパティと衝突しています: "
+        "{}  (実ブラウザでは代入時に TypeError が発生し app.js の実行が止まります)".format(
+            collisions
+        )
+    )

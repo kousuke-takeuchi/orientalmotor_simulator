@@ -27,16 +27,16 @@ var SERIES = [
   { key: "torque_permille", label: "トルク [‰]", color: "#ffcf7e" }
 ];
 
-var history = {};  // nodeId -> { key -> [値] }
+var chartHistory = {};  // nodeId -> { key -> [値] }
 
 function pushHistory(nodes) {
   Object.keys(nodes).forEach(function (nodeId) {
-    if (!history[nodeId]) {
-      history[nodeId] = {};
-      SERIES.forEach(function (series) { history[nodeId][series.key] = []; });
+    if (!chartHistory[nodeId]) {
+      chartHistory[nodeId] = {};
+      SERIES.forEach(function (series) { chartHistory[nodeId][series.key] = []; });
     }
     SERIES.forEach(function (series) {
-      var buffer = history[nodeId][series.key];
+      var buffer = chartHistory[nodeId][series.key];
       buffer.push(Number(nodes[nodeId][series.key]) || 0);
       if (buffer.length > HISTORY_POINTS) buffer.shift();
     });
@@ -97,7 +97,7 @@ function renderCharts(nodes) {
         container.appendChild(wrapper);
       }
       drawChart(wrapper.querySelector("canvas"),
-        history[nodeId] ? history[nodeId][series.key] : [], series.color);
+        chartHistory[nodeId] ? chartHistory[nodeId][series.key] : [], series.color);
     });
   });
 }
