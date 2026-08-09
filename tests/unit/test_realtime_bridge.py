@@ -196,3 +196,17 @@ def test_heartbeat_from_watched_node_notifies_the_model():
     msg = can.Message(arbitration_id=0x702, data=[0x7F], is_extended_id=False)
     listener.on_message_received(msg)
     assert model._heartbeat_consumer_reference_time == model.sim_time
+
+
+def test_malformed_rpdo_frame_does_not_escape_the_listener():
+    """壊れた RPDO フレーム 1 つで受信スレッドを落とさない。
+
+    python-can 4.5.0 の Notifier はリスナーが投げた例外を握らず受信
+    スレッドごと止めるため、ここで例外が漏れるとバス上の 1 フレームで
+    以後の全受信 (SDO も含む) が死ぬ。
+    """
+    listener, _model, queue, _sync, _node = make_listener()
+    # RPDO2 の既定マッピングは 6040h(2byte) + 6060h(1byte) = 3 バイト必要。
+    msg = can.Message(arbitration_id=0x301, data=[0x0F], is_extended_id=False)
+    listener.on_message_received(msg)  # 例外が出ないこと
+    assert queue.pending_count() == 0

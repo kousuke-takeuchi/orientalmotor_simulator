@@ -10,7 +10,11 @@ Recorder.FrameListener と同じパターンで can.Listener を直接実装す�
 ObjectDictionary が持つ ODVariable.encode_raw()/decode_raw() をそのまま
 使う (符号付き整数の扱いを canopen 本体と一致させるため)。
 """
+import logging
+
 import can
+
+logger = logging.getLogger(__name__)
 
 # canopen.NmtBase.state は文字列を返すため、node guarding 応答用に数値へ
 # 変換する対応表をこちら側で持つ (canopen の private 属性に依存しないため)。
@@ -122,7 +126,18 @@ class _NodeListener(can.Listener):
             if comm.valid and comm.cob_id == can_id:
                 trigger = "sync" if comm.transmission_type == 0x00 else "immediate"
                 mapping = self._model.rpdo_mapping[slot]
-                for index, sub, value in _decode_rpdo(self._od, data, mapping):
+                try:
+                    decoded = _decode_rpdo(self._od, data, mapping)
+                except Exception as err:
+                    # マッピングよりデータ長が短い等、壊れたフレームは捨てる。
+                    # ここで例外を漏らすと python-can の Notifier が受信
+                    # スレッドごと止めてしまい、バス上の 1 フレームで以後の
+                    # 全受信 (SDO も含む) が死ぬ。黙って捨てずログに出す。
+                    logger.warning(
+                        "node%d: RPDO%d (COB-ID %03Xh, %d バイト) を解釈できません: %s",
+                        self._model.node_id, slot + 1, can_id, len(data), err)
+                    return
+                for index, sub, value in decoded:
                     self._queue.put(index, sub, value, trigger=trigger)
                 return
 
