@@ -1,3 +1,5 @@
+import time
+
 import canopen
 import pytest
 
@@ -36,3 +38,15 @@ def test_two_nodes_answer_independently(running_sim, master):
     assert one.sdo[0x414B].raw == 1
     assert two.sdo[0x414B].raw == 1
     assert one.sdo.rx_cobid != two.sdo.rx_cobid
+
+
+def test_sdo_write_is_applied_within_one_step(running_sim, master):
+    """CAN 経由の書き込みが、キュー経由でも実際にモデルへ届く。"""
+    node = _remote(master, 1)
+    node.sdo[0x6083].raw = 4321
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if running_sim.models[1].read_object(0x6083) == 4321:
+            return
+        time.sleep(0.01)
+    assert running_sim.models[1].read_object(0x6083) == 4321

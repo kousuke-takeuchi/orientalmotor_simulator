@@ -4,7 +4,7 @@ import canopen
 from omsim.driver.errors import ObjectAccessError
 
 
-def build_local_node(node_id, od, model):
+def build_local_node(node_id, od, model, queue=None):
     node = canopen.LocalNode(node_id, od)
 
     def on_read(index, subindex, od):
@@ -14,8 +14,13 @@ def build_local_node(node_id, od, model):
             raise canopen.SdoAbortedError(err.abort_code)
 
     def on_write(index, subindex, od, data):
+        value = od.decode_raw(data)
+        if queue is not None:
+            # 受信スレッドから直接 model を触らない。適用は step() の先頭。
+            queue.put(index, subindex, value)
+            return
         try:
-            model.write_object(index, subindex, od.decode_raw(data))
+            model.write_object(index, subindex, value)
         except ObjectAccessError as err:
             raise canopen.SdoAbortedError(err.abort_code)
 
