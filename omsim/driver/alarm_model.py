@@ -8,6 +8,13 @@ import collections
 ALARM_OVERLOAD = 0x30
 EMCY_OVERLOAD = 0x2310
 EMCY_ERROR_RESET = 0x0000
+# HP-5143E 4.5 実測: FF53h/81h = HWTO input circuit error、
+# FF68h/81h = HWTO input detection Non-excitation
+ALARM_HWTO_CIRCUIT = 0x53
+ALARM_HWTO_DETECTED = 0x68
+EMCY_HWTO_CIRCUIT = 0xFF53
+EMCY_HWTO_DETECTED = 0xFF68
+ERROR_REGISTER_HWTO = 0x81
 # HP-5143E 4.5 (p23): Node guarding error or heartbeat error
 EMCY_HEARTBEAT_ERROR = 0x8130
 

@@ -4,7 +4,16 @@
 """
 import copy
 
-from omsim.driver.alarm_model import EMCY_HEARTBEAT_ERROR, AlarmModel
+from omsim.driver.alarm_model import (
+    ALARM_HWTO_CIRCUIT,
+    ALARM_HWTO_DETECTED,
+    EMCY_HEARTBEAT_ERROR,
+    EMCY_HWTO_CIRCUIT,
+    EMCY_HWTO_DETECTED,
+    ERROR_REGISTER_HWTO,
+    AlarmModel,
+)
+from omsim.driver.hwto import HwtoModel  # noqa: I100 (driver 層内の依存)
 from omsim.driver.errors import (
     ABORT_DEVICE_STATE,
     ABORT_NO_DATA,
@@ -99,6 +108,10 @@ class DriverModel(object):
                           inhibit_time_100us=50, event_timer_ms=0)
             for i in range(4)
         ]
+
+        # HWTO (動力遮断機能)。入力は CN4 の配線経由で set_hwto_inputs() から入る。
+        # 既定は「両方 ON」= 動力遮断が働いていない状態。
+        self.hwto = HwtoModel()
 
         # node guarding (100Ch/100Dh)。生死判定は NMT master 側の責務のため
         # (4.2.1 実測)、スレーブ側は値の保持と RTR 応答のみ行う。
@@ -197,6 +210,8 @@ class DriverModel(object):
     def step(self, dt):
         self.sim_time += dt
 
+        self._apply_hwto(dt)
+
         if self.alarms.is_active:
             self.state_machine.set_fault(True)
         self.state_machine.step(dt)
@@ -226,6 +241,74 @@ class DriverModel(object):
 
         self._check_heartbeat_consumer()
 
+    # --- HWTO (動力遮断機能) ---
+
+    def set_hwto_inputs(self, hwto1_on, hwto2_on):
+        """CN4 の HWTO 入力状態を伝える。次の step() から効く。
+
+        入力 ON = DC24V が来ている = 正常。OFF = 動力遮断が働く。
+        配線 (何がこの入力を駆動するか) は omsim/sim/wiring.py が持つ。
+        """
+        self._hwto_inputs = (bool(hwto1_on), bool(hwto2_on))
+
+    def _apply_hwto(self, dt):
+        hwto1_on, hwto2_on = getattr(self, "_hwto_inputs", (True, True))
+        self.hwto.set_inputs(hwto1_on, hwto2_on, dt)
+
+        # HP-5143E 6.2 (p35) の遷移 7/9/10/12 は「HWTO signal input is active」でも
+        # 起きる (= Disable Voltage 相当)。ステートマシンの voltage_enabled に
+        # 落とせば、既存の遷移ロジックがそのまま使える。
+        # 両方の入力が OFF になって ETO 状態に入った場合は、入力が戻っても
+        # ETO-CLR (40D0h) で解除するまで無励磁のまま (HP-5141J p204)。
+        self.state_machine.voltage_enabled = not (
+            self.hwto.power_cut or self.hwto.eto_active)
+
+        alarm = self.hwto.take_pending_alarm()
+        if alarm == "circuit":
+            self.alarms.raise_alarm(
+                ALARM_HWTO_CIRCUIT, EMCY_HWTO_CIRCUIT, ERROR_REGISTER_HWTO)
+        elif alarm == "detected":
+            self.alarms.raise_alarm(
+                ALARM_HWTO_DETECTED, EMCY_HWTO_DETECTED, ERROR_REGISTER_HWTO)
+
+    @property
+    def power_cut(self):
+        """HWTO でトルクを出せない状態か。"""
+        return self.hwto.power_cut
+
+    @property
+    def brake_engaged(self):
+        """電磁ブレーキが保持されているか。
+
+        HP-5141J p204: 動力遮断状態では「電磁ブレーキが保持されます」。
+        励磁されていない間はブレーキが効いている、と同じ意味で扱う。
+        """
+        return self.power_cut or not self.plant.excited
+
+    @router.reader(0x60FD)
+    def _read_digital_inputs(self, sub):
+        # HP-5143E 60FDh 実測: bit0 NLS / bit1 PLS / bit2 HS / bit3 HWTO /
+        # bit16-31 R-OUT。リミットセンサとリモート出力は P4 以降のため 0。
+        value = 0
+        if self.hwto.hwtoin_mon:
+            value |= 1 << 3
+        return value
+
+    @router.writer(0x40D0)
+    def _write_clear_eto(self, sub, value):
+        """40D0h Clear ETO。両方の HWTO 入力が ON に戻っていないと解除できない。"""
+        if not int(value):
+            return
+        if not self.hwto.clear_eto():
+            raise ObjectAccessError(
+                ABORT_DEVICE_STATE,
+                "40D0h: HWTO 入力が OFF のままなので ETO を解除できません")
+
+    @router.reader(0x40D0)
+    def _read_clear_eto(self, sub):
+        # 実行トリガのため読み出しは常に 0 (EDS 既定値と同じ)。
+        return 0
+
     def _sync_excited(self):
         """励磁状態 (plant.excited) をステートマシンの現在の状態から同期する。
 
@@ -252,6 +335,15 @@ class DriverModel(object):
             "torque_permille": self.plant.torque_permille,
             # 3D 表示が軸の回転角を出すのに使う。JS 側に定数を二重に持たない。
             "increments_per_revolution": self.units.increments_per_shaft_rev,
+            "power_cut": self.power_cut,
+            "brake_engaged": self.brake_engaged,
+            "hwto": {
+                "hwto1_on": self.hwto.hwto1_on,
+                "hwto2_on": self.hwto.hwto2_on,
+                "eto_active": self.hwto.eto_active,
+                "edm_mon": self.hwto.edm_mon,
+                "hwtoin_mon": self.hwto.hwtoin_mon,
+            },
             "alarm": self.alarms.active_alarm,
             "alarm_history": self.alarms.history,
         }

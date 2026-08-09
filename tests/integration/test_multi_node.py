@@ -92,7 +92,9 @@ def test_removing_excitation_on_one_node_does_not_affect_the_other(stepped_sim):
     _enable(two, 100)
     stepped_sim.run_for(2.0)
 
-    one.state_machine.voltage_enabled = False  # HWTO 相当。実装は P5
+    # HWTO1 入力を落とす (安全リレー断相当)。P3.5 で実装され、
+    # voltage_enabled を直接叩く必要が無くなった。
+    one.set_hwto_inputs(False, True)
     stepped_sim.run_for(1.5)
 
     assert abs(one.read_object(0x606C)) <= 2
