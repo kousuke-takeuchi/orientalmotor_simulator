@@ -36,6 +36,7 @@ from omsim.driver.errors import (
 )
 from omsim.driver.motor_plant import MotorPlant
 from omsim.driver.objects import ObjectRouter
+from omsim.driver.operation_data import OperationDataTable
 from omsim.driver.operation_type import resolve_operation_type
 from omsim.driver.operation import (
     HomingMode,
@@ -232,6 +233,11 @@ class DriverModel(object):
             PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x606C, 0, 32)]),
         ]
 
+        # ストアードデータ運転の運転データと選択状態
+        self.operation_data = OperationDataTable()
+        self.net_selection_data_number = 0    # 403Dh
+        self._previous_start = False
+
         # R-IN の機能割付 (既定は HP-5143E 60FEh 実測どおり)。
         # 変更は MEXE02 (mxex) 経由のみ。CANopen からは触れない。
         self.remote_input_assignment = list(R_IN_DEFAULTS)
@@ -270,6 +276,8 @@ class DriverModel(object):
         "touch_probe_values", "touch_probe_counters",
         # 4033h の writer が起動待ちトリガと直近値を書き換える。
         "direct_data",
+        # ストアードデータ運転のテーブルと選択状態
+        "operation_data",
         # 1010h:02 の writer が保存領域を in-place 更新する。
         "_saved_parameters",
     )
@@ -338,6 +346,7 @@ class DriverModel(object):
 
         ctx = self._context()
         self._apply_remote_inputs()
+        self._handle_start_signal()
         # ダイレクトデータ運転が動いている間は CiA402 の運転モードを止める。
         # 両方が毎周期プロファイルを書くと指令を奪い合い、加減速レート次第で
         # まったく加速しなくなる (実経路のテストで露見)。
@@ -1207,6 +1216,58 @@ class DriverModel(object):
     @router.writer(0x1011, 2)
     def _write_restore_communication(self, sub, value):
         self._restore_defaults(value, communication_only=True)
+
+    # --- ストアードデータ運転 ---
+
+    @property
+    def selected_data_number(self):
+        """今選ばれている運転データ No.。
+
+        D-SEL0-7 が 1 つでも入っていればその合成値、無ければ 403Dh
+        (NET selection data number) を使う (HP-5141J 5-4 の選択方法)。
+        """
+        selected = 0
+        for bit in range(8):
+            if self.remote_signal("D-SEL{}".format(bit)):
+                selected |= 1 << bit
+        if selected:
+            return selected
+        return self.net_selection_data_number
+
+    def start_stored_operation(self):
+        """選択中の運転データで運転を始める。
+
+        運転方式の実行系はダイレクトデータ運転と共有する (同じ表・同じ動き)。
+        """
+        data = self.operation_data[self.selected_data_number]
+        kind = resolve_operation_type(data.operation_type)   # 未実装はここで abort
+        if not self.plant.excited:
+            return
+        self.direct_data.position = data.position
+        self.direct_data.velocity = data.velocity
+        self.direct_data.acceleration = data.acceleration
+        self.direct_data.deceleration = data.deceleration
+        self._start_direct_motion(kind)
+
+    def _handle_start_signal(self):
+        start = self.remote_signal("START")
+        rising = start and not self._previous_start
+        self._previous_start = start
+        if rising:
+            self.start_stored_operation()
+
+    @router.reader(0x403D)
+    def _read_net_selection_data_number(self, sub):
+        return self.net_selection_data_number
+
+    @router.writer(0x403D)
+    def _write_net_selection_data_number(self, sub, value):
+        number = int(value)
+        if not (0 <= number < self.operation_data.size):
+            raise ObjectAccessError(
+                ABORT_VALUE_RANGE,
+                "403Dh は 0-{}".format(self.operation_data.size - 1))
+        self.net_selection_data_number = number
 
     # --- ダイレクトデータ運転 (402Ch-4034h) ---
 
