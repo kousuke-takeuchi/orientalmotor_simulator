@@ -20,6 +20,11 @@ from omsim.driver.alarm_model import (
     AlarmModel,
 )
 from omsim.driver.hwto import HwtoModel  # noqa: I100 (driver 層内の依存)
+from omsim.driver.io_functions import (
+    R_IN_DEFAULTS,
+    R_IN_SLOTS,
+    input_function_name,
+)
 from omsim.driver.direct_data import DirectDataState
 from omsim.driver.errors import (
     ABORT_CANNOT_STORE,
@@ -31,6 +36,7 @@ from omsim.driver.errors import (
 )
 from omsim.driver.motor_plant import MotorPlant
 from omsim.driver.objects import ObjectRouter
+from omsim.driver.operation_data import OperationDataTable
 from omsim.driver.operation_type import resolve_operation_type
 from omsim.driver.operation import (
     HomingMode,
@@ -227,6 +233,31 @@ class DriverModel(object):
             PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x606C, 0, 32)]),
         ]
 
+        # I/O 原点復帰運転 (4160h-4163h)。HP-5141J 7 章 / 13-2 実測。
+        #   4160h 原点復帰方法 0:2センサ / 1:3センサ(既定) / 2:1方向回転 / 3:押し当て
+        #   4161h 開始方向     0:−側 / 1:＋側(既定)
+        self.io_homing_method = 1
+        self.io_homing_direction = 1
+        self.io_homing_start_velocity_rpm = 30
+        self.io_homing_completed = False
+        self._io_homing_phase = None
+        self._previous_home_signal = False
+
+        # FW/RV 運転のパラメータ (HP-5141J 13-2 実測。NET-ID 336/337)。
+        # CANopen の OD には無い (MEXE02 専用)。
+        self.jog_distance = 1              # (JOG) 移動量 [step]
+        self.jog_velocity_rpm = 100        # (JOG) 運転速度 [r/min]
+        self._previous_inching = {"fw": False, "rv": False}
+
+        # ストアードデータ運転の運転データと選択状態
+        self.operation_data = OperationDataTable()
+        self.net_selection_data_number = 0    # 403Dh
+        self._previous_start = False
+
+        # R-IN の機能割付 (既定は HP-5143E 60FEh 実測どおり)。
+        # 変更は MEXE02 (mxex) 経由のみ。CANopen からは触れない。
+        self.remote_input_assignment = list(R_IN_DEFAULTS)
+
         # 稼働時間・走行距離のモニタ (40A1h/40A9h/407Eh/407Fh/407Ah)
         self.total_uptime_seconds = 0.0
         self.continuous_uptime_seconds = 0.0
@@ -261,6 +292,8 @@ class DriverModel(object):
         "touch_probe_values", "touch_probe_counters",
         # 4033h の writer が起動待ちトリガと直近値を書き換える。
         "direct_data",
+        # ストアードデータ運転のテーブルと選択状態
+        "operation_data",
         # 1010h:02 の writer が保存領域を in-place 更新する。
         "_saved_parameters",
     )
@@ -329,6 +362,10 @@ class DriverModel(object):
 
         ctx = self._context()
         self._apply_remote_inputs()
+        self._handle_start_signal()
+        self._handle_home_signal()
+        if not self._step_io_homing(dt):
+            self._handle_fwrv_signals()
         # ダイレクトデータ運転が動いている間は CiA402 の運転モードを止める。
         # 両方が毎周期プロファイルを書くと指令を奪い合い、加減速レート次第で
         # まったく加速しなくなる (実経路のテストで露見)。
@@ -363,7 +400,7 @@ class DriverModel(object):
 
         運転モード側はこの値を参照する (モードごとに同じ分岐を書かないため)。
         """
-        if self._remote_input(self.R_IN_STOP):
+        if self.remote_signal("STOP"):
             return 0.0
         return self.target_velocity_rpm
 
@@ -469,7 +506,7 @@ class DriverModel(object):
         # FREE 入力 (R-IN6) も励磁を落とす。HWTO と同じ「電圧無効」の扱い。
         self.state_machine.voltage_enabled = not (
             self.hwto.power_cut or self.hwto.eto_active
-            or self._remote_input(self.R_IN_FREE))
+            or self.remote_signal("FREE"))
 
         alarm = self.hwto.take_pending_alarm()
         if alarm == "circuit":
@@ -789,6 +826,21 @@ class DriverModel(object):
     def _remote_input(self, bit):
         return bool(self.digital_outputs & (1 << (self.R_IO_BASE_BIT + bit)))
 
+    def set_remote_input_function(self, slot, number):
+        """R-IN の機能割付を変える (MEXE02 相当)。"""
+        if not (0 <= int(slot) < R_IN_SLOTS):
+            raise ValueError("R-IN のスロットは 0-{} です".format(R_IN_SLOTS - 1))
+        input_function_name(number)   # 一覧に無い番号はここで ValueError
+        self.remote_input_assignment[int(slot)] = int(number)
+
+    def remote_signal(self, name):
+        """信号名で R-IN の状態を引く。割り付いていなければ常に False。"""
+        for slot, number in enumerate(self.remote_input_assignment):
+            if number and input_function_name(number) == name:
+                if self._remote_input(slot):
+                    return True
+        return False
+
     @router.reader(0x60FE, 1)
     def _read_digital_outputs(self, sub):
         return self.digital_outputs
@@ -830,13 +882,13 @@ class DriverModel(object):
         ストップ、CLR は位置偏差クリア。STOP / QSTOP / CLR は Statusword
         bit11 (Internal limit active) を立てる (HP-5143E 7.3.4 実測)。
         """
-        if self._remote_input(self.R_IN_QSTOP):
+        if self.remote_signal("QSTOP"):
             self.state_machine.write_controlword(
                 (self.state_machine.controlword & ~0x0004) | 0x0002)
         self._remote_input_limit = (
-            self._remote_input(self.R_IN_STOP)
-            or self._remote_input(self.R_IN_QSTOP)
-            or self._remote_input(self.R_IN_CLR))
+            self.remote_signal("STOP")
+            or self.remote_signal("QSTOP")
+            or self.remote_signal("CLR"))
 
     @router.reader(0x1003, 0)
     def _read_error_field_count(self, sub):
@@ -1183,6 +1235,229 @@ class DriverModel(object):
     @router.writer(0x1011, 2)
     def _write_restore_communication(self, sub, value):
         self._restore_defaults(value, communication_only=True)
+
+    # --- I/O 原点復帰運転 (4160h-4163h) ---
+
+    IO_HOMING_TWO_SENSOR = 0
+    _IO_HOMING_NAMES = {
+        0: "2センサ方式", 1: "3センサ方式", 2: "1方向回転方式", 3: "押し当て方式"}
+
+    def start_io_homing(self):
+        """HOME 信号で原点復帰を始める。
+
+        2 センサ方式のみ実装。リミットセンサを検出したら反転して脱出し、
+        4169h の戻り量ぶん動いて停止、その位置を原点にする (HP-5141J 7-2)。
+        """
+        if self.io_homing_method != self.IO_HOMING_TWO_SENSOR:
+            raise NotImplementedObjectError(
+                ABORT_VALUE_RANGE,
+                "4160h の {} は未実装です (2センサ方式のみ実装)".format(
+                    self._IO_HOMING_NAMES[self.io_homing_method]))
+        if not self.plant.excited:
+            return
+        self._io_homing_phase = "searching"
+
+    def _io_homing_sensor(self):
+        return "FW-LS" if self.io_homing_direction else "RV-LS"
+
+    def _io_homing_sign(self):
+        return +1 if self.io_homing_direction else -1
+
+    def _step_io_homing(self, dt):
+        """2 センサ方式の原点復帰を 1 ステップ進める。運転中なら True。"""
+        if self._io_homing_phase is None:
+            return False
+        if not self.plant.excited:
+            self._io_homing_phase = None
+            return False
+
+        sensor = self._io_homing_sensor()
+        sign = self._io_homing_sign()
+        # リミットセンサは limit_inputs (CN4) 側の状態を使う。
+        touched = self.limit_inputs["fw_ls" if sign > 0 else "rv_ls"]
+        velocity = self.io_homing_start_velocity_rpm
+
+        if self._io_homing_phase == "searching":
+            if touched:
+                self._io_homing_phase = "leaving"
+            else:
+                self._direct_motion = {
+                    "kind": "velocity", "held": True,
+                    "velocity": sign * velocity,
+                    "acceleration": self.profile_acceleration_rpm_s,
+                    "deceleration": self.profile_deceleration_rpm_s,
+                }
+                return True
+        if self._io_homing_phase == "leaving":
+            if touched:
+                self._direct_motion = {
+                    "kind": "velocity", "held": True,
+                    "velocity": -sign * velocity,
+                    "acceleration": self.profile_acceleration_rpm_s,
+                    "deceleration": self.profile_deceleration_rpm_s,
+                }
+                return True
+            # 脱出した。4169h (2 センサ原点復帰の戻り量) ぶん動いて止まる。
+            self.direct_data.velocity = velocity
+            self.direct_data.acceleration = self.profile_acceleration_rpm_s
+            self.direct_data.deceleration = self.profile_deceleration_rpm_s
+            self.direct_data.position = -sign * int(self.homing_backward_steps)
+            self._start_direct_motion("relative_detected")
+            self._io_homing_phase = "backing_off"
+            return True
+        if self._io_homing_phase == "backing_off":
+            if self._direct_motion is not None:
+                return True
+            self.plant.preset_position(int(self.home_offset))
+            self.profile.reset(0.0)
+            self.plant.velocity = 0.0
+            self._io_homing_phase = None
+            self.io_homing_completed = True
+            self.on_homing_completed()
+            return True
+        return False
+
+    def _handle_home_signal(self):
+        pressed = self.remote_signal("HOME")
+        rising = pressed and not self._previous_home_signal
+        self._previous_home_signal = pressed
+        if rising and self.io_homing_method == self.IO_HOMING_TWO_SENSOR:
+            self.start_io_homing()
+
+    @router.reader(0x4160)
+    def _read_io_homing_method(self, sub):
+        return self.io_homing_method
+
+    @router.writer(0x4160)
+    def _write_io_homing_method(self, sub, value):
+        method = int(value)
+        if method not in self._IO_HOMING_NAMES:
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "4160h は 0-3")
+        self.io_homing_method = method
+
+    def set_io_homing_direction(self, value):
+        """(HOME) 原点復帰開始方向。4161h は EDS に無く CANopen からは触れない
+        (MEXE02 専用) ため、専用の口として持つ。"""
+        if int(value) not in (0, 1):
+            raise ValueError("原点復帰開始方向は 0 (−側) か 1 (＋側)")
+        self.io_homing_direction = int(value)
+
+    @router.reader(0x4163)
+    def _read_io_homing_start_velocity(self, sub):
+        return int(self.io_homing_start_velocity_rpm)
+
+    @router.writer(0x4163)
+    def _write_io_homing_start_velocity(self, sub, value):
+        if not (1 <= int(value) <= 4000000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "4163h は 1〜4,000,000")
+        self.io_homing_start_velocity_rpm = int(value)
+
+    # --- FW/RV 運転 (JOG / インチング / 連続運転) ---
+
+    def _jog_direction(self, forward_signal, reverse_signal):
+        """+1 / -1 / 0 を返す。両方入っていたら動かさない。"""
+        forward = self.remote_signal(forward_signal)
+        reverse = self.remote_signal(reverse_signal)
+        if forward and reverse:
+            return 0
+        if forward:
+            return +1
+        if reverse:
+            return -1
+        return 0
+
+    def _handle_fwrv_signals(self):
+        """FW/RV 系の信号を見て運転を作る。
+
+        JOG (FW-JOG/RV-JOG) と連続運転 (FW-SPD/RV-SPD) は「押している間だけ」、
+        インチング (FW-JOG-P/RV-JOG-P) は「立ち上がりで 1 回だけ移動量ぶん」。
+        実行系はダイレクトデータ運転と共有する。
+        """
+        if not self.plant.excited:
+            return False
+
+        # インチングは立ち上がり検出
+        for key, signal, sign in (("fw", "FW-JOG-P", +1), ("rv", "RV-JOG-P", -1)):
+            pressed = self.remote_signal(signal)
+            rising = pressed and not self._previous_inching[key]
+            self._previous_inching[key] = pressed
+            if rising:
+                self.direct_data.velocity = self.jog_velocity_rpm
+                self.direct_data.acceleration = self.profile_acceleration_rpm_s
+                self.direct_data.deceleration = self.profile_deceleration_rpm_s
+                self.direct_data.position = sign * int(self.jog_distance)
+                self._start_direct_motion("relative_detected")
+                return True
+
+        direction = self._jog_direction("FW-JOG", "RV-JOG")
+        if direction == 0:
+            direction = self._jog_direction("FW-SPD", "RV-SPD")
+        if direction == 0:
+            # 押している間だけの運転だったなら止める
+            if self._direct_motion is not None and self._direct_motion.get("held"):
+                self._direct_motion = None
+            return False
+
+        self._direct_motion = {
+            "kind": "velocity",
+            "held": True,
+            "velocity": direction * self.jog_velocity_rpm,
+            "acceleration": self.profile_acceleration_rpm_s,
+            "deceleration": self.profile_deceleration_rpm_s,
+        }
+        return True
+
+    # --- ストアードデータ運転 ---
+
+    @property
+    def selected_data_number(self):
+        """今選ばれている運転データ No.。
+
+        D-SEL0-7 が 1 つでも入っていればその合成値、無ければ 403Dh
+        (NET selection data number) を使う (HP-5141J 5-4 の選択方法)。
+        """
+        selected = 0
+        for bit in range(8):
+            if self.remote_signal("D-SEL{}".format(bit)):
+                selected |= 1 << bit
+        if selected:
+            return selected
+        return self.net_selection_data_number
+
+    def start_stored_operation(self):
+        """選択中の運転データで運転を始める。
+
+        運転方式の実行系はダイレクトデータ運転と共有する (同じ表・同じ動き)。
+        """
+        data = self.operation_data[self.selected_data_number]
+        kind = resolve_operation_type(data.operation_type)   # 未実装はここで abort
+        if not self.plant.excited:
+            return
+        self.direct_data.position = data.position
+        self.direct_data.velocity = data.velocity
+        self.direct_data.acceleration = data.acceleration
+        self.direct_data.deceleration = data.deceleration
+        self._start_direct_motion(kind)
+
+    def _handle_start_signal(self):
+        start = self.remote_signal("START")
+        rising = start and not self._previous_start
+        self._previous_start = start
+        if rising:
+            self.start_stored_operation()
+
+    @router.reader(0x403D)
+    def _read_net_selection_data_number(self, sub):
+        return self.net_selection_data_number
+
+    @router.writer(0x403D)
+    def _write_net_selection_data_number(self, sub, value):
+        number = int(value)
+        if not (0 <= number < self.operation_data.size):
+            raise ObjectAccessError(
+                ABORT_VALUE_RANGE,
+                "403Dh は 0-{}".format(self.operation_data.size - 1))
+        self.net_selection_data_number = number
 
     # --- ダイレクトデータ運転 (402Ch-4034h) ---
 
@@ -2020,8 +2295,6 @@ class DriverModel(object):
         (0x4148, "P5: 絶対座標未設定時の絶対位置決め許可。値の保持のみ"),
         (0x414B, "P5: ATL 機能モード設定。値の保持のみ"),
         (0x415F, "P5: JOG/HOME トルク制限値。値の保持のみ"),
-        (0x4160, "P5: (HOME) 原点復帰モード。値の保持のみ"),
-        (0x4163, "P5: (HOME) 起動速度。値の保持のみ"),
         (0x4169, "P5: (HOME) 2 センサ原点復帰の戻りステップ数。値の保持のみ"),
         (0x4186, "P6: アラーム発生時の停止タイムアウト。値の保持のみ"),
         (0x41A4, "P5: モーター回転方向。値の保持のみ"),

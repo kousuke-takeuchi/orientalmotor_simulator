@@ -33,9 +33,10 @@ def load_node_mxex(manager, nodes, stream=None):
             continue
         report = apply_mxex(manager.models[spec.node_id], spec.mxex)
         print(
-            "mxex: node_id={} {} -> {} 件中 {} 件を適用 (未知 {} / 拒否 {})".format(
+            "mxex: node_id={} {} -> {} 件中 {} 件を適用 "
+            "(未知 {} / 拒否 {} / MEXE02 専用 {})".format(
                 spec.node_id, spec.mxex, report["total"], report["applied"],
-                report["unknown"], report["rejected"]),
+                report["unknown"], report["rejected"], report["mexe02_only"]),
             file=stream,
         )
 
