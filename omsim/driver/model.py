@@ -127,6 +127,18 @@ class DriverModel(object):
         self.homing_completed = False
         # CN4 のリミット/HOME センサ入力 (実配線は P5)
         self.limit_inputs = {"fw_ls": False, "rv_ls": False, "home": False}
+        # touch probe (60B8h-60BDh / 60D5h-60D8h)。既定 3131h は EDS 実測。
+        self.touch_probe_function = 0x3131
+        # probe -> {"positive": 値 or None, "negative": ..., カウンタ}
+        self.touch_probe_values = {
+            1: {"positive": None, "negative": None},
+            2: {"positive": None, "negative": None},
+        }
+        self.touch_probe_counters = {
+            1: {"positive": 0, "negative": 0},
+            2: {"positive": 0, "negative": 0},
+        }
+
         # 607Dh Software position limit
         self.software_min_position = 0
         self.software_max_position = 0
@@ -767,6 +779,112 @@ class DriverModel(object):
             self.plant.preset_position(window[1])
         elif position < window[0]:
             self.plant.preset_position(window[0])
+
+    # --- touch probe (60B8h-60BDh / 60D5h-60D8h) ---
+
+    _PROBE_BITS = {
+        # probe: (有効化, 連続, トリガ源 ZSG, 正エッジ, 負エッジ, status 基準ビット)
+        1: (0, 1, 2, 4, 5, 0),
+        2: (8, 9, 10, 12, 13, 8),
+    }
+
+    def _probe_flag(self, probe, which):
+        bits = self._PROBE_BITS[probe]
+        index = {"enable": 0, "continuous": 1, "zsg": 2,
+                 "positive": 3, "negative": 4}[which]
+        return bool(self.touch_probe_function & (1 << bits[index]))
+
+    def trigger_touch_probe(self, probe, edge):
+        """probe 入力 (USR-LAT-IN0/1) のエッジを伝える。
+
+        CN4 の実際の入力割付は P5。ここは「エッジが来た」という事実だけを
+        受ける内部 API。
+        """
+        if probe not in self._PROBE_BITS:
+            raise ValueError("touch probe は 1 か 2 です: {}".format(probe))
+        if edge not in ("positive", "negative"):
+            raise ValueError("edge は positive か negative です: {}".format(edge))
+        if not self._probe_flag(probe, "enable"):
+            return
+        if not self._probe_flag(probe, edge):
+            return
+        stored = self.touch_probe_values[probe][edge]
+        if stored is not None and not self._probe_flag(probe, "continuous"):
+            # 単発モードは最初のイベントだけを保持する
+            return
+        self.touch_probe_values[probe][edge] = int(self.plant.position)
+        self.touch_probe_counters[probe][edge] += 1
+
+    @router.reader(0x60B8)
+    def _read_touch_probe_function(self, sub):
+        return self.touch_probe_function
+
+    @router.writer(0x60B8)
+    def _write_touch_probe_function(self, sub, value):
+        raw = int(value) & 0xFFFF
+        for probe, bits in self._PROBE_BITS.items():
+            if raw & (1 << bits[2]):
+                raise NotImplementedObjectError(
+                    ABORT_VALUE_RANGE,
+                    "60B8h: probe{} の ZSG-N トリガ源は未実装 "
+                    "(index pulse のモデルが無い)".format(probe))
+        was_enabled = dict(
+            (probe, self._probe_flag(probe, "enable")) for probe in self._PROBE_BITS)
+        self.touch_probe_function = raw
+        for probe in self._PROBE_BITS:
+            if was_enabled[probe] and not self._probe_flag(probe, "enable"):
+                # 無効化したら保持値とカウンタを捨てる (status も落ちる)
+                self.touch_probe_values[probe] = {"positive": None, "negative": None}
+                self.touch_probe_counters[probe] = {"positive": 0, "negative": 0}
+
+    @router.reader(0x60B9)
+    def _read_touch_probe_status(self, sub):
+        value = 0
+        for probe, bits in self._PROBE_BITS.items():
+            base = bits[5]
+            if self._probe_flag(probe, "enable"):
+                value |= 1 << base
+            if self.touch_probe_values[probe]["positive"] is not None:
+                value |= 1 << (base + 1)
+            if self.touch_probe_values[probe]["negative"] is not None:
+                value |= 1 << (base + 2)
+        return value
+
+    def _probe_value(self, probe, edge):
+        stored = self.touch_probe_values[probe][edge]
+        return _clamp_int32(stored if stored is not None else 0)
+
+    @router.reader(0x60BA)
+    def _read_probe1_positive(self, sub):
+        return self._probe_value(1, "positive")
+
+    @router.reader(0x60BB)
+    def _read_probe1_negative(self, sub):
+        return self._probe_value(1, "negative")
+
+    @router.reader(0x60BC)
+    def _read_probe2_positive(self, sub):
+        return self._probe_value(2, "positive")
+
+    @router.reader(0x60BD)
+    def _read_probe2_negative(self, sub):
+        return self._probe_value(2, "negative")
+
+    @router.reader(0x60D5)
+    def _read_probe1_positive_counter(self, sub):
+        return self.touch_probe_counters[1]["positive"]
+
+    @router.reader(0x60D6)
+    def _read_probe1_negative_counter(self, sub):
+        return self.touch_probe_counters[1]["negative"]
+
+    @router.reader(0x60D7)
+    def _read_probe2_positive_counter(self, sub):
+        return self.touch_probe_counters[2]["positive"]
+
+    @router.reader(0x60D8)
+    def _read_probe2_negative_counter(self, sub):
+        return self.touch_probe_counters[2]["negative"]
 
     # --- hm (Homing) と原点まわり ---
 
