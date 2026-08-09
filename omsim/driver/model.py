@@ -105,14 +105,13 @@ class DriverModel(object):
 
         self._sync_excited()
 
-        ctx = self._context()
-        self.operation.step(dt, ctx)
-
         if not self.state_machine.is_operation_enabled and self.state_machine.state in (
             State.FAULT, State.SWITCH_ON_DISABLED
         ):
             self.profile.reset(0.0)
 
+        ctx = self._context()
+        self.operation.step(dt, ctx)
         self.operation.apply_status_bits(ctx)
 
         # HP-5143E 6.2 (p35) Transition 12: quick-stop-active はクイック

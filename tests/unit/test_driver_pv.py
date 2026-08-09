@@ -304,3 +304,41 @@ def test_torque_limit_objects_are_stubbed():
 def test_nmt_reset_is_stubbed():
     keys = set((index, sub) for index, sub, _reason in DriverModel.router.stubs())
     assert (0x0000, 0x81) in keys
+
+
+# --- 修正: step() 内の profile.reset(0.0) の呼び出し位置 ---
+#
+# pv を OperationMode へ分離した際、profile.reset(0.0) の判定が
+# self.operation.step(dt, ctx) の後ろへ移ってしまった。reset(0.0) の設計
+# 意図は「減速ランプを経由せずに指令を即座にゼロにする」ことであり、この
+# 順序では FAULT に突入した最初の 1 ステップで reset される前に profile が
+# 1 回進み、その (減速ランプ中の) 指令値で plant.step() が呼ばれてしまう。
+#
+# 606Ch (実速度) や 606Bh を step() の後で読んでも、この 1 ステップ限りの
+# 差は MotorPlant が非励磁時に command_velocity 引数そのものを無視する
+# ため観測できない (excited=False なら target は常に 0 に強制される)。
+# そのため plant.step() の呼び出し引数そのものをスパイして検証する。
+def test_fault_zeroes_the_command_immediately_without_ramping():
+    model = enabled_model()
+    model.write_object(0x6083, 0, 6000)  # 100 r/min/s よりずっと緩い加減速
+    model.write_object(0x6084, 0, 6000)
+    model.write_object(0x60FF, 0, 3000)
+    run(model, 3.0)
+    assert abs(model.read_object(0x606C) - 3000) <= 5  # 前提: 高速で回っている
+
+    seen_commands = []
+    original_step = model.plant.step
+
+    def spy_step(dt, command_velocity):
+        seen_commands.append(command_velocity)
+        return original_step(dt, command_velocity)
+
+    model.plant.step = spy_step
+
+    model.inject_alarm(0x30, 0x2310)
+    model.step(0.001)
+
+    # FAULT に落ちた最初の 1 ステップで、plant に渡る指令はランプ値では
+    # なく即座に 0.0 でなければならない (profile.reset(0.0) の意味づけ)。
+    assert seen_commands == [0.0]
+    assert model.state_machine.state == State.FAULT
