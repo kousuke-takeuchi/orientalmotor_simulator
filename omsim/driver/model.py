@@ -233,6 +233,16 @@ class DriverModel(object):
             PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x606C, 0, 32)]),
         ]
 
+        # I/O 原点復帰運転 (4160h-4163h)。HP-5141J 7 章 / 13-2 実測。
+        #   4160h 原点復帰方法 0:2センサ / 1:3センサ(既定) / 2:1方向回転 / 3:押し当て
+        #   4161h 開始方向     0:−側 / 1:＋側(既定)
+        self.io_homing_method = 1
+        self.io_homing_direction = 1
+        self.io_homing_start_velocity_rpm = 30
+        self.io_homing_completed = False
+        self._io_homing_phase = None
+        self._previous_home_signal = False
+
         # FW/RV 運転のパラメータ (HP-5141J 13-2 実測。NET-ID 336/337)。
         # CANopen の OD には無い (MEXE02 専用)。
         self.jog_distance = 1              # (JOG) 移動量 [step]
@@ -353,7 +363,9 @@ class DriverModel(object):
         ctx = self._context()
         self._apply_remote_inputs()
         self._handle_start_signal()
-        self._handle_fwrv_signals()
+        self._handle_home_signal()
+        if not self._step_io_homing(dt):
+            self._handle_fwrv_signals()
         # ダイレクトデータ運転が動いている間は CiA402 の運転モードを止める。
         # 両方が毎周期プロファイルを書くと指令を奪い合い、加減速レート次第で
         # まったく加速しなくなる (実経路のテストで露見)。
@@ -1223,6 +1235,122 @@ class DriverModel(object):
     @router.writer(0x1011, 2)
     def _write_restore_communication(self, sub, value):
         self._restore_defaults(value, communication_only=True)
+
+    # --- I/O 原点復帰運転 (4160h-4163h) ---
+
+    IO_HOMING_TWO_SENSOR = 0
+    _IO_HOMING_NAMES = {
+        0: "2センサ方式", 1: "3センサ方式", 2: "1方向回転方式", 3: "押し当て方式"}
+
+    def start_io_homing(self):
+        """HOME 信号で原点復帰を始める。
+
+        2 センサ方式のみ実装。リミットセンサを検出したら反転して脱出し、
+        4169h の戻り量ぶん動いて停止、その位置を原点にする (HP-5141J 7-2)。
+        """
+        if self.io_homing_method != self.IO_HOMING_TWO_SENSOR:
+            raise NotImplementedObjectError(
+                ABORT_VALUE_RANGE,
+                "4160h の {} は未実装です (2センサ方式のみ実装)".format(
+                    self._IO_HOMING_NAMES[self.io_homing_method]))
+        if not self.plant.excited:
+            return
+        self._io_homing_phase = "searching"
+
+    def _io_homing_sensor(self):
+        return "FW-LS" if self.io_homing_direction else "RV-LS"
+
+    def _io_homing_sign(self):
+        return +1 if self.io_homing_direction else -1
+
+    def _step_io_homing(self, dt):
+        """2 センサ方式の原点復帰を 1 ステップ進める。運転中なら True。"""
+        if self._io_homing_phase is None:
+            return False
+        if not self.plant.excited:
+            self._io_homing_phase = None
+            return False
+
+        sensor = self._io_homing_sensor()
+        sign = self._io_homing_sign()
+        # リミットセンサは limit_inputs (CN4) 側の状態を使う。
+        touched = self.limit_inputs["fw_ls" if sign > 0 else "rv_ls"]
+        velocity = self.io_homing_start_velocity_rpm
+
+        if self._io_homing_phase == "searching":
+            if touched:
+                self._io_homing_phase = "leaving"
+            else:
+                self._direct_motion = {
+                    "kind": "velocity", "held": True,
+                    "velocity": sign * velocity,
+                    "acceleration": self.profile_acceleration_rpm_s,
+                    "deceleration": self.profile_deceleration_rpm_s,
+                }
+                return True
+        if self._io_homing_phase == "leaving":
+            if touched:
+                self._direct_motion = {
+                    "kind": "velocity", "held": True,
+                    "velocity": -sign * velocity,
+                    "acceleration": self.profile_acceleration_rpm_s,
+                    "deceleration": self.profile_deceleration_rpm_s,
+                }
+                return True
+            # 脱出した。4169h (2 センサ原点復帰の戻り量) ぶん動いて止まる。
+            self.direct_data.velocity = velocity
+            self.direct_data.acceleration = self.profile_acceleration_rpm_s
+            self.direct_data.deceleration = self.profile_deceleration_rpm_s
+            self.direct_data.position = -sign * int(self.homing_backward_steps)
+            self._start_direct_motion("relative_detected")
+            self._io_homing_phase = "backing_off"
+            return True
+        if self._io_homing_phase == "backing_off":
+            if self._direct_motion is not None:
+                return True
+            self.plant.preset_position(int(self.home_offset))
+            self.profile.reset(0.0)
+            self.plant.velocity = 0.0
+            self._io_homing_phase = None
+            self.io_homing_completed = True
+            self.on_homing_completed()
+            return True
+        return False
+
+    def _handle_home_signal(self):
+        pressed = self.remote_signal("HOME")
+        rising = pressed and not self._previous_home_signal
+        self._previous_home_signal = pressed
+        if rising and self.io_homing_method == self.IO_HOMING_TWO_SENSOR:
+            self.start_io_homing()
+
+    @router.reader(0x4160)
+    def _read_io_homing_method(self, sub):
+        return self.io_homing_method
+
+    @router.writer(0x4160)
+    def _write_io_homing_method(self, sub, value):
+        method = int(value)
+        if method not in self._IO_HOMING_NAMES:
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "4160h は 0-3")
+        self.io_homing_method = method
+
+    def set_io_homing_direction(self, value):
+        """(HOME) 原点復帰開始方向。4161h は EDS に無く CANopen からは触れない
+        (MEXE02 専用) ため、専用の口として持つ。"""
+        if int(value) not in (0, 1):
+            raise ValueError("原点復帰開始方向は 0 (−側) か 1 (＋側)")
+        self.io_homing_direction = int(value)
+
+    @router.reader(0x4163)
+    def _read_io_homing_start_velocity(self, sub):
+        return int(self.io_homing_start_velocity_rpm)
+
+    @router.writer(0x4163)
+    def _write_io_homing_start_velocity(self, sub, value):
+        if not (1 <= int(value) <= 4000000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "4163h は 1〜4,000,000")
+        self.io_homing_start_velocity_rpm = int(value)
 
     # --- FW/RV 運転 (JOG / インチング / 連続運転) ---
 
@@ -2167,8 +2295,6 @@ class DriverModel(object):
         (0x4148, "P5: 絶対座標未設定時の絶対位置決め許可。値の保持のみ"),
         (0x414B, "P5: ATL 機能モード設定。値の保持のみ"),
         (0x415F, "P5: JOG/HOME トルク制限値。値の保持のみ"),
-        (0x4160, "P5: (HOME) 原点復帰モード。値の保持のみ"),
-        (0x4163, "P5: (HOME) 起動速度。値の保持のみ"),
         (0x4169, "P5: (HOME) 2 センサ原点復帰の戻りステップ数。値の保持のみ"),
         (0x4186, "P6: アラーム発生時の停止タイムアウト。値の保持のみ"),
         (0x41A4, "P5: モーター回転方向。値の保持のみ"),
