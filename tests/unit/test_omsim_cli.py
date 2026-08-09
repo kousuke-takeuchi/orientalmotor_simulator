@@ -86,7 +86,8 @@ def test_list_stubs_prints_stub_lines_and_exits_without_opening_network(capsys):
     assert (0x409B, 0) in printed_keys
     assert (0x6081, 0) in printed_keys
     assert (0x60FE, 1) in printed_keys
-    assert (0x1016, 1) in printed_keys
+    # 1016h は P3 で実働になったため、スタブ一覧には出ない。
+    assert (0x1016, 1) not in printed_keys
 
 
 def test_web_port_defaults_to_disabled():

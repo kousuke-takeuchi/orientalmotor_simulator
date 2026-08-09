@@ -12,6 +12,15 @@ ObjectDictionary が持つ ODVariable.encode_raw()/decode_raw() をそのまま
 """
 import can
 
+# canopen.NmtBase.state は文字列を返すため、node guarding 応答用に数値へ
+# 変換する対応表をこちら側で持つ (canopen の private 属性に依存しないため)。
+# 4.2.1 実測: Operational=5 / Stopped=4 / Pre-operational=127。
+_NMT_STATE_TO_CODE = {
+    "OPERATIONAL": 0x05,
+    "STOPPED": 0x04,
+    "PRE-OPERATIONAL": 0x7F,
+}
+
 
 def _od_variable(od, index, sub):
     obj = od[index]
@@ -66,11 +75,13 @@ class _NodeListener(can.Listener):
     """1 ノードぶんの RPDO / SYNC 受信を捌く。node guarding / Heartbeat
     consumer の受信は Task 11 でこのクラスに追加する。"""
 
-    def __init__(self, model, od, queue, sync_counter):
+    def __init__(self, node, model, od, queue, sync_counter):
+        self._node = node
         self._model = model
         self._od = od
         self._queue = queue
         self._sync_counter = sync_counter
+        self._guard_toggle = False
 
     def on_message_received(self, msg):
         if getattr(msg, "is_error_frame", False):
@@ -82,8 +93,28 @@ class _NodeListener(can.Listener):
             self._sync_counter.notify()
             return
 
+        if is_rtr and can_id == 0x700 + self._model.node_id:
+            self._respond_node_guard()
+            return
+
+        watch_node_id = self._model.heartbeat_consumer_node_id
+        if not is_rtr and watch_node_id and can_id == 0x700 + watch_node_id:
+            # Heartbeat/boot-up は 1 バイトの NMT 状態コードのみを積む
+            # (4.2.2/4.3 実測)。sim_time は step() 側で管理しているため、
+            # ここでは「今受信した」ことだけを model に伝える。
+            self._model.on_heartbeat_received(watch_node_id, self._model.sim_time)
+            return
+
         if not is_rtr:
             self._handle_rpdo(can_id, bytes(msg.data))
+
+    def _respond_node_guard(self):
+        state_code = _NMT_STATE_TO_CODE.get(self._node.nmt.state)
+        if state_code is None:
+            return
+        byte0 = (0x80 if self._guard_toggle else 0x00) | state_code
+        self._guard_toggle = not self._guard_toggle
+        self._node.network.send_message(0x700 + self._model.node_id, [byte0])
 
     def _handle_rpdo(self, can_id, data):
         for slot in range(4):
@@ -109,15 +140,15 @@ class RealtimeBridge(object):
         self._tpdo_runtime = {}  # node_id -> [runtime_slot0..3]
         self._sync_producer = {}  # node_id -> _SyncProducerState
 
-    def _make_listener(self, model, od, queue, sync_counter, node_id):
-        return _NodeListener(model, od, queue, sync_counter)
+    def _make_listener(self, node, model, od, queue, sync_counter):
+        return _NodeListener(node, model, od, queue, sync_counter)
 
     def _make_tpdo_runtime(self):
         return [_TpdoRuntime() for _ in range(4)]
 
     def attach(self, node, model, od, queue, sync_counter):
         """node が Network に登録済みの状態で呼ぶ。"""
-        listener = self._make_listener(model, od, queue, sync_counter, model.node_id)
+        listener = self._make_listener(node, model, od, queue, sync_counter)
         self._listeners[model.node_id] = listener
         self._tpdo_runtime[model.node_id] = self._make_tpdo_runtime()
         self._sync_producer[model.node_id] = _SyncProducerState()

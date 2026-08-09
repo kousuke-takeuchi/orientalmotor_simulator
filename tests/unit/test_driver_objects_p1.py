@@ -195,7 +195,8 @@ def test_two_instances_do_not_share_p1_object_state():
 def test_stub_objects_lists_the_four_unimplemented_objects():
     stubs = make_model().stub_objects()
     stub_keys = set((index, sub) for index, sub, _reason in stubs)
-    assert (0x1016, 1) in stub_keys
+    # 1016h (Heartbeat consumer) は P3 で実働になったのでスタブではない。
+    assert (0x1016, 1) not in stub_keys
     assert (0x409B, 0) in stub_keys
     assert (0x60FE, 1) in stub_keys
     assert (0x6081, 0) in stub_keys

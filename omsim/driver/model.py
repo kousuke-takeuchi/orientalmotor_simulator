@@ -4,7 +4,7 @@
 """
 import copy
 
-from omsim.driver.alarm_model import AlarmModel
+from omsim.driver.alarm_model import EMCY_HEARTBEAT_ERROR, AlarmModel
 from omsim.driver.errors import (
     ABORT_DEVICE_STATE,
     ABORT_VALUE_RANGE,
@@ -98,6 +98,15 @@ class DriverModel(object):
                           inhibit_time_100us=50, event_timer_ms=0)
             for i in range(4)
         ]
+
+        # node guarding (100Ch/100Dh)。生死判定は NMT master 側の責務のため
+        # (4.2.1 実測)、スレーブ側は値の保持と RTR 応答のみ行う。
+        self.guard_time_ms = 0
+        self.life_time_factor = 0
+        # Heartbeat consumer (1016h sub1)
+        self.heartbeat_consumer_node_id = 0
+        self.heartbeat_consumer_time_ms = 0
+        self._heartbeat_consumer_reference_time = None
 
         # 1005h COB-ID SYNC message。producer/consumer の詳細実装は Task 10。
         self.sync_cob_id = 0x80
@@ -213,6 +222,8 @@ class DriverModel(object):
             )
             if stopped:
                 self.state_machine.stop_completed()
+
+        self._check_heartbeat_consumer()
 
     def _sync_excited(self):
         """励磁状態 (plant.excited) をステートマシンの現在の状態から同期する。
@@ -453,13 +464,66 @@ class DriverModel(object):
             raise ObjectAccessError(ABORT_VALUE_RANGE, "6081h は 0 以上")
         self.profile_velocity_rpm = int(value)
 
-    @router.reader(0x1016, 1, stub="P3: Heartbeat consumer 未実装。値の保持のみ")
+    @router.reader(0x1016, 1)
     def _read_consumer_heartbeat_time(self, sub):
         return self.consumer_heartbeat_config
 
-    @router.writer(0x1016, 1, stub="P3: Heartbeat consumer 未実装。値の保持のみ")
+    @router.writer(0x1016, 1)
     def _write_consumer_heartbeat_time(self, sub, value):
-        self.consumer_heartbeat_config = int(value) & 0xFFFFFFFF
+        raw = int(value) & 0xFFFFFFFF
+        self.consumer_heartbeat_config = raw
+        self.heartbeat_consumer_node_id = (raw >> 16) & 0xFF
+        self.heartbeat_consumer_time_ms = raw & 0xFFFF
+        enabled = bool(
+            self.heartbeat_consumer_node_id and self.heartbeat_consumer_time_ms)
+        self._heartbeat_consumer_reference_time = self.sim_time if enabled else None
+
+    # --- node guarding (100Ch/100Dh) と Heartbeat consumer の判定 ---
+
+    def _check_heartbeat_consumer(self):
+        if not self.heartbeat_consumer_node_id or not self.heartbeat_consumer_time_ms:
+            return
+        if self._heartbeat_consumer_reference_time is None:
+            return
+        elapsed_ms = (self.sim_time - self._heartbeat_consumer_reference_time) * 1000.0
+        if elapsed_ms > self.heartbeat_consumer_time_ms:
+            self.alarms.raise_alarm(
+                alarm_code=0, emcy_code=EMCY_HEARTBEAT_ERROR, error_register=0x11)
+
+    def on_heartbeat_received(self, node_id, sim_time):
+        """監視対象ノードからの Heartbeat/boot-up 受信を伝える。
+
+        node/realtime_bridge.py から呼ばれる (driver 層に can 依存を
+        持ち込まないための窓口)。
+        """
+        if node_id != self.heartbeat_consumer_node_id:
+            return
+        self._heartbeat_consumer_reference_time = sim_time
+        if self.alarms.is_active and self.alarms.error_code == EMCY_HEARTBEAT_ERROR:
+            self.alarms.set_cause_cleared(True)
+            self.alarms.reset()
+
+    @router.reader(0x100C)
+    def _read_guard_time(self, sub):
+        return self.guard_time_ms
+
+    @router.writer(0x100C)
+    def _write_guard_time(self, sub, value):
+        time_ms = int(value)
+        if not (0 <= time_ms <= 65535):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "100Ch は 0-65535")
+        self.guard_time_ms = time_ms
+
+    @router.reader(0x100D)
+    def _read_life_time_factor(self, sub):
+        return self.life_time_factor
+
+    @router.writer(0x100D)
+    def _write_life_time_factor(self, sub, value):
+        factor = int(value)
+        if not (0 <= factor <= 255):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "100Dh は 0-255")
+        self.life_time_factor = factor
 
     @router.reader(0x1017)
     def _read_producer_heartbeat_time(self, sub):

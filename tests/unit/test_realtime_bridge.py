@@ -7,18 +7,30 @@ from omsim.sim.command_queue import CommandQueue
 from omsim.sim.sync_counter import SyncCounter
 
 
+class FakeNmt(object):
+    def __init__(self, state="PRE-OPERATIONAL"):
+        self.state = state
+
+
+class FakeNode(object):
+    def __init__(self, state="PRE-OPERATIONAL"):
+        self.nmt = FakeNmt(state)
+        self.network = None  # node guarding のテストでは FakeNetwork を後付けする
+
+
 def make_listener(node_id=1):
     od = load_eds(DEFAULT_EDS_PATH)
     model = DriverModel(node_id=node_id)
     queue = CommandQueue()
     sync_counter = SyncCounter()
     bridge = RealtimeBridge()
-    listener = bridge._make_listener(model, od, queue, sync_counter, node_id)
-    return listener, model, queue, sync_counter
+    node = FakeNode()
+    listener = bridge._make_listener(node, model, od, queue, sync_counter)
+    return listener, model, queue, sync_counter, node
 
 
 def test_rpdo1_frame_queues_controlword_as_immediate():
-    listener, model, queue, _sync = make_listener()
+    listener, model, queue, _sync, _node = make_listener()
     msg = can.Message(arbitration_id=0x201, data=[0x07, 0x00], is_extended_id=False)
     listener.on_message_received(msg)
     assert queue.pending_count() == 1
@@ -27,7 +39,7 @@ def test_rpdo1_frame_queues_controlword_as_immediate():
 
 
 def test_rpdo2_frame_decodes_two_mapped_objects():
-    listener, model, queue, _sync = make_listener()
+    listener, model, queue, _sync, _node = make_listener()
     # RPDO2 既定マッピング: 6040h(16bit) + 6060h(8bit)
     msg = can.Message(arbitration_id=0x301, data=[0x0F, 0x00, 0x03], is_extended_id=False)
     listener.on_message_received(msg)
@@ -36,7 +48,7 @@ def test_rpdo2_frame_decodes_two_mapped_objects():
 
 
 def test_sync_transmission_type_rpdo_is_queued_as_sync_trigger():
-    listener, model, queue, _sync = make_listener()
+    listener, model, queue, _sync, _node = make_listener()
     model.write_object(0x1400, 2, 0x00)  # SYNC 反映へ変更
     before = model.read_object(0x6040)
     msg = can.Message(arbitration_id=0x201, data=[0x07, 0x00], is_extended_id=False)
@@ -48,7 +60,7 @@ def test_sync_transmission_type_rpdo_is_queued_as_sync_trigger():
 
 
 def test_disabled_rpdo_is_ignored():
-    listener, model, queue, _sync = make_listener()
+    listener, model, queue, _sync, _node = make_listener()
     model.write_object(0x1400, 1, model.rpdo_comm[0].cob_id | (1 << 31))  # 無効化
     msg = can.Message(arbitration_id=0x201, data=[0x07, 0x00], is_extended_id=False)
     listener.on_message_received(msg)
@@ -56,21 +68,21 @@ def test_disabled_rpdo_is_ignored():
 
 
 def test_unrelated_cob_id_is_ignored():
-    listener, model, queue, _sync = make_listener()
+    listener, model, queue, _sync, _node = make_listener()
     msg = can.Message(arbitration_id=0x999, data=[0x07, 0x00], is_extended_id=False)
     listener.on_message_received(msg)
     assert queue.pending_count() == 0
 
 
 def test_sync_frame_notifies_sync_counter():
-    listener, _model, _queue, sync_counter = make_listener()
+    listener, _model, _queue, sync_counter, _node = make_listener()
     msg = can.Message(arbitration_id=0x80, data=[], is_extended_id=False)
     listener.on_message_received(msg)
     assert sync_counter.take() == 1
 
 
 def test_remote_frame_at_sync_cob_id_is_not_treated_as_sync():
-    listener, _model, _queue, sync_counter = make_listener()
+    listener, _model, _queue, sync_counter, _node = make_listener()
     msg = can.Message(arbitration_id=0x80, data=[], is_extended_id=False,
                       is_remote_frame=True)
     listener.on_message_received(msg)
@@ -164,3 +176,23 @@ def test_disabled_tpdo_never_sends():
     bridge.on_sync(1, model, network, od, sim_time=0.0)
     bridge.step(1, model, network, od, sim_time=0.0)
     assert network.sent == []
+
+
+def test_node_guard_rtr_responds_with_toggled_state_byte():
+    listener, _model, _queue, _sync, node = make_listener()
+    node.network = FakeNetwork()
+    listener._respond_node_guard()
+    listener._respond_node_guard()
+    assert len(node.network.sent) == 2
+    first_byte = node.network.sent[0][1][0]
+    second_byte = node.network.sent[1][1][0]
+    assert (first_byte & 0x7F) == 0x7F  # PRE-OPERATIONAL
+    assert (first_byte & 0x80) != (second_byte & 0x80)
+
+
+def test_heartbeat_from_watched_node_notifies_the_model():
+    listener, model, _queue, _sync, _node = make_listener()
+    model.write_object(0x1016, 1, (2 << 16) | 500)
+    msg = can.Message(arbitration_id=0x702, data=[0x7F], is_extended_id=False)
+    listener.on_message_received(msg)
+    assert model._heartbeat_consumer_reference_time == model.sim_time

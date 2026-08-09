@@ -8,6 +8,8 @@ import collections
 ALARM_OVERLOAD = 0x30
 EMCY_OVERLOAD = 0x2310
 EMCY_ERROR_RESET = 0x0000
+# HP-5143E 4.5 (p23): Node guarding error or heartbeat error
+EMCY_HEARTBEAT_ERROR = 0x8130
 
 
 class AlarmModel(object):
