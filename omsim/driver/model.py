@@ -20,6 +20,11 @@ from omsim.driver.alarm_model import (
     AlarmModel,
 )
 from omsim.driver.hwto import HwtoModel  # noqa: I100 (driver 層内の依存)
+from omsim.driver.io_functions import (
+    R_IN_DEFAULTS,
+    R_IN_SLOTS,
+    input_function_name,
+)
 from omsim.driver.direct_data import DirectDataState
 from omsim.driver.errors import (
     ABORT_CANNOT_STORE,
@@ -227,6 +232,10 @@ class DriverModel(object):
             PdoMappingParams([MappingEntry(0x6041, 0, 16), MappingEntry(0x606C, 0, 32)]),
         ]
 
+        # R-IN の機能割付 (既定は HP-5143E 60FEh 実測どおり)。
+        # 変更は MEXE02 (mxex) 経由のみ。CANopen からは触れない。
+        self.remote_input_assignment = list(R_IN_DEFAULTS)
+
         # 稼働時間・走行距離のモニタ (40A1h/40A9h/407Eh/407Fh/407Ah)
         self.total_uptime_seconds = 0.0
         self.continuous_uptime_seconds = 0.0
@@ -363,7 +372,7 @@ class DriverModel(object):
 
         運転モード側はこの値を参照する (モードごとに同じ分岐を書かないため)。
         """
-        if self._remote_input(self.R_IN_STOP):
+        if self.remote_signal("STOP"):
             return 0.0
         return self.target_velocity_rpm
 
@@ -469,7 +478,7 @@ class DriverModel(object):
         # FREE 入力 (R-IN6) も励磁を落とす。HWTO と同じ「電圧無効」の扱い。
         self.state_machine.voltage_enabled = not (
             self.hwto.power_cut or self.hwto.eto_active
-            or self._remote_input(self.R_IN_FREE))
+            or self.remote_signal("FREE"))
 
         alarm = self.hwto.take_pending_alarm()
         if alarm == "circuit":
@@ -789,6 +798,21 @@ class DriverModel(object):
     def _remote_input(self, bit):
         return bool(self.digital_outputs & (1 << (self.R_IO_BASE_BIT + bit)))
 
+    def set_remote_input_function(self, slot, number):
+        """R-IN の機能割付を変える (MEXE02 相当)。"""
+        if not (0 <= int(slot) < R_IN_SLOTS):
+            raise ValueError("R-IN のスロットは 0-{} です".format(R_IN_SLOTS - 1))
+        input_function_name(number)   # 一覧に無い番号はここで ValueError
+        self.remote_input_assignment[int(slot)] = int(number)
+
+    def remote_signal(self, name):
+        """信号名で R-IN の状態を引く。割り付いていなければ常に False。"""
+        for slot, number in enumerate(self.remote_input_assignment):
+            if number and input_function_name(number) == name:
+                if self._remote_input(slot):
+                    return True
+        return False
+
     @router.reader(0x60FE, 1)
     def _read_digital_outputs(self, sub):
         return self.digital_outputs
@@ -830,13 +854,13 @@ class DriverModel(object):
         ストップ、CLR は位置偏差クリア。STOP / QSTOP / CLR は Statusword
         bit11 (Internal limit active) を立てる (HP-5143E 7.3.4 実測)。
         """
-        if self._remote_input(self.R_IN_QSTOP):
+        if self.remote_signal("QSTOP"):
             self.state_machine.write_controlword(
                 (self.state_machine.controlword & ~0x0004) | 0x0002)
         self._remote_input_limit = (
-            self._remote_input(self.R_IN_STOP)
-            or self._remote_input(self.R_IN_QSTOP)
-            or self._remote_input(self.R_IN_CLR))
+            self.remote_signal("STOP")
+            or self.remote_signal("QSTOP")
+            or self.remote_signal("CLR"))
 
     @router.reader(0x1003, 0)
     def _read_error_field_count(self, sub):

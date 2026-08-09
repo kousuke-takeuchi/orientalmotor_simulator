@@ -65,3 +65,35 @@ def test_diff_lists_only_the_differences():
 def test_diff_on_the_same_file_is_empty():
     result = diff_mxex(RIGHT, RIGHT)
     assert result["different"] == {}
+
+
+def test_netids_beyond_the_manufacturer_range_are_reported_separately():
+    """netid >= 0x1000 は CANopen の 4000h-4FFFh に収まらない (MEXE02 専用)。
+
+    「未知」と混ぜると、実在するパラメータを取りこぼしていることに気付けない。
+    """
+    model = DriverModel(node_id=1)
+    # 0x5000: CANopen に無く、シミュレータも反映できないパラメータ
+    # 0x4400: CANopen には無いが R-IN0 機能選択として反映できる
+    # 0x7FF : メーカ固有領域だが OD に無い (未知)
+    path = write_mxex({0x5000: 7, 0x4400: 32, 0x7FF: 1})
+    try:
+        report = apply_mxex(model, path)
+    finally:
+        os.remove(path)
+    assert report["mexe02_only"] == 1
+    assert report["unknown"] == 1
+    assert report["applied"] == 1
+
+
+def test_r_in_function_assignment_from_mxex_is_applied():
+    """R-IN0 機能選択 (netid 17408 = 0x4400) を書き換えると割付が変わる。"""
+    model = DriverModel(node_id=1)
+    path = write_mxex({0x4400: 32})             # R-IN0 を START に
+    try:
+        apply_mxex(model, path)
+    finally:
+        os.remove(path)
+    assert model.remote_input_assignment[0] == 32
+    model.write_object(0x403E, 0, 1 << 16)
+    assert model.remote_signal("START") is True
