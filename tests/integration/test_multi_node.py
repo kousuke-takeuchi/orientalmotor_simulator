@@ -76,7 +76,7 @@ def test_fault_on_one_node_does_not_stop_the_other(stepped_sim):
     _enable(two, 100)
     stepped_sim.run_for(2.0)
 
-    one.inject_alarm(0x30, 0x2310)
+    one.inject_alarm(0x30)
     stepped_sim.run_for(1.5)
 
     assert abs(one.read_object(0x606C)) <= 2

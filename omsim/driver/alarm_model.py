@@ -6,7 +6,9 @@
 import collections
 
 ALARM_OVERLOAD = 0x30
-EMCY_OVERLOAD = 0x2310
+# HP-5143E 4.5 実測: メーカ固有アラームの EMCY は 0xFF00 | アラームコード。
+# P1 では CiA301 の汎用コード 2310h を使っていたが、実機の表と食い違っていた。
+EMCY_OVERLOAD = 0xFF30
 EMCY_ERROR_RESET = 0x0000
 # HP-5143E 4.5 実測: FF53h/81h = HWTO input circuit error、
 # FF68h/81h = HWTO input detection Non-excitation

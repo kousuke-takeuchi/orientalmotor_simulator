@@ -4,6 +4,12 @@
 """
 import copy
 
+from omsim.driver.alarm_codes import (
+    ALARM_CODES,
+    ERROR_REGISTER_MANUFACTURER,
+    emcy_for,
+    error_register_for,
+)
 from omsim.driver.alarm_model import (
     ALARM_HWTO_CIRCUIT,
     ALARM_HWTO_DETECTED,
@@ -545,7 +551,20 @@ class DriverModel(object):
 
     # --- テストと Web からアラームを注入する口 ---
 
-    def inject_alarm(self, alarm_code, emcy_code, error_register=0x21):
+    def inject_alarm(self, alarm_code, emcy_code=None, error_register=None):
+        """アラームを注入する。EMCY コードと error register は表から決まる。
+
+        明示的に渡された場合はそちらを優先する (通信系アラームなど、表に
+        無い組み合わせを流し込むテスト用)。
+        """
+        if emcy_code is None:
+            emcy_code = emcy_for(alarm_code)
+        if error_register is None:
+            # 表に無いコード (テストが作る架空のアラーム) はメーカ固有扱い。
+            error_register = (
+                error_register_for(alarm_code)
+                if int(alarm_code) in ALARM_CODES
+                else ERROR_REGISTER_MANUFACTURER)
         self.alarms.raise_alarm(alarm_code, emcy_code, error_register)
 
     def clear_alarm_cause(self):
