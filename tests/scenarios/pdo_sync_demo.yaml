@@ -1,0 +1,20 @@
+name: PDO/SYNC/Heartbeat を動かして Web に映るか確認する
+nodes: [1]
+steps:
+  - nmt: start
+  # TPDO1 を「毎 SYNC で送信」に変更する
+  - sdo_write: {index: 0x1800, sub: 2, value: 1}
+  # Heartbeat producer を有効化する (Web の CAN ログが HB で埋まらないよう
+  # 周期は長めの 1000ms にしている)
+  - sdo_write: {index: 0x1017, value: 1000}
+  - sdo_write: {index: 0x6060, value: 3}
+  - sdo_write: {index: 0x6040, value: 0x0006}
+  - sdo_write: {index: 0x6040, value: 0x0007}
+  - sdo_write: {index: 0x6040, value: 0x000F}
+  - sdo_write: {index: 0x60FF, value: 100}
+  - expect: {index: 0x6041, mask: 0x006F, value: 0x0027, timeout: 2.0}
+  # マスタ役として SYNC を送る (TPDO1 が返ってくるはず)
+  - pdo_send: {cob_id: 0x80, data: []}
+  - wait: 0.5
+  - pdo_send: {cob_id: 0x80, data: []}
+  - expect: {index: 0x606C, value: 100, tolerance: 3, timeout: 3.0}

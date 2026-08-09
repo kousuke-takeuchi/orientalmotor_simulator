@@ -30,8 +30,10 @@
         <button id="pause">停止</button>
       </div>
       <p class="note">
-        SocketCAN の receive_own_messages が既定で無効のため、omsim 自身が送信した
-        フレーム (SDO レスポンス / boot-up / EMCY) は表示されません。受信フレームのみです。
+        受信フレームに加え、omsim 自身が送信したフレーム (SDO レスポンス /
+        boot-up / Heartbeat / EMCY / TPDO / SYNC / node guarding 応答) も
+        表示します。SocketCAN の receive_own_messages は既定で無効ですが、
+        送信経路 (network.bus.send) をラップして記録しているためです。
       </p>
       <pre id="canlog"></pre>
     </section>
