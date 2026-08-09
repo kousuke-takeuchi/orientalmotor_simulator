@@ -85,6 +85,30 @@ class DriverModel(object):
     def write_object(self, index, sub=0, value=0):
         self.router.write(self, index, sub, value)
 
+    # validate_object の使い捨てコピーで deepcopy する対象。
+    # writer が実際に変更しうる入れ子オブジェクト/コンテナのみを列挙する。
+    # 新しい writer が別の入れ子オブジェクトを触るようになったら追記すること
+    # (test_shadow_isolation_holds_for_every_registered_writer が検出する)。
+    _SHADOW_DEEP_ATTRS = (
+        "state_machine", "plant", "alarms", "passthrough_values",
+    )
+
+    def _shadow(self):
+        """validate_object 用の使い捨てコピーを作る。
+
+        copy.deepcopy(self) は state_machine/plant/profile/units/operation/
+        alarms など全ての入れ子オブジェクトを再帰的に複製するため、PDO の
+        書込み頻度では重すぎる (P2 最終レビュー指摘)。writer が実際に
+        変更するのは _SHADOW_DEEP_ATTRS のものだけで、profile・units・
+        operation は writer から直接変更されない (target_velocity_rpm 等は
+        DriverModel 自身のスカラー属性であり、shallow copy で自動的に
+        独立になる)。そのため shallow copy + 上記だけを個別に deepcopy する。
+        """
+        shadow = copy.copy(self)
+        for name in self._SHADOW_DEEP_ATTRS:
+            setattr(shadow, name, copy.deepcopy(getattr(self, name)))
+        return shadow
+
     def validate_object(self, index, sub=0, value=0):
         """index:sub に value を書き込めるかどうかだけを判定する（実体は書き換えない）。
 
@@ -92,7 +116,7 @@ class DriverModel(object):
         abort 応答を正しく返せるようにするための窓口。writer ハンドラの中
         には 40C0h のアラームリセットのように副作用を伴うものがあるため、
         「検証専用のロジックを別に書く」のではなく、writer ハンドラ自体を
-        self の使い捨てディープコピー上で実際に走らせ、例外が出るかどうかで
+        使い捨てコピー (_shadow()) 上で実際に走らせ、例外が出るかどうかで
         判定する。これなら検証ロジックと適用ロジックが二重に書かれてずれる
         ことがない。コピー側に生じた副作用はコピーごと捨てるため、呼び出し
         元の状態には一切影響しない。
@@ -100,8 +124,7 @@ class DriverModel(object):
         受け付けられない場合は ObjectAccessError（NotImplementedObjectError
         を含む）を投げる。
         """
-        shadow = copy.deepcopy(self)
-        self.router.write(shadow, index, sub, value)
+        self.router.write(self._shadow(), index, sub, value)
 
     def stub_objects(self):
         """[(index, sub, 理由), ...] 未実装スタブオブジェクトの一覧。"""

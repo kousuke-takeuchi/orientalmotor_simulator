@@ -46,3 +46,56 @@ def test_two_models_do_not_share_state():
     a.step(0.001)
     assert a.sim_time != b.sim_time
     assert b.sim_time == 0.0
+
+
+def test_shadow_isolation_holds_for_every_registered_writer():
+    """全 writer について、現在の値で validate_object しても実モデルは一切変化しない。
+
+    すでに legal な値を書き戻すだけなので値の妥当性チェックは常に通り、
+    writer 内部の副作用 (state_machine の遷移や alarms のリセット等) だけが
+    実モデルに漏れていないかを機械的に確認できる。軽量化した _shadow() の
+    対象リストに漏れがあれば、このテストが実モデルの変化として検出する。
+    """
+    from omsim.driver.errors import ObjectAccessError
+    from omsim.driver.model import DriverModel
+
+    model = DriverModel(node_id=1)
+    model.state_machine.step(0.001)
+    model.write_object(0x6040, 0, 0x0006)
+    model.write_object(0x6040, 0, 0x0007)
+    model.write_object(0x6040, 0, 0x000F)
+
+    def deep_state():
+        return (
+            model.state_machine.statusword,
+            model.state_machine.controlword,
+            model.plant.excited,
+            model.plant.position,
+            model.alarms.active_alarm,
+            tuple(model.alarms.history),
+            tuple(sorted(model.passthrough_values.items())),
+        )
+
+    before = deep_state()
+    for index, sub in sorted(DriverModel.router._writers):
+        try:
+            current = model.read_object(index, sub)
+        except ObjectAccessError:
+            continue
+        if current is None:
+            # 未書込みの passthrough は読み出すと None。書き戻せる値が無いので対象外。
+            continue
+        try:
+            model.validate_object(index, sub, current)
+        except ObjectAccessError:
+            continue
+        assert deep_state() == before, (
+            "{:04X}h:{:02X} の validate_object が実モデルを変化させた".format(index, sub))
+
+
+def test_validate_object_still_isolates_controlword_side_effects():
+    from omsim.driver.model import DriverModel
+
+    model = DriverModel(node_id=1)
+    model.validate_object(0x6040, 0, 0x0006)
+    assert model.state_machine.controlword == 0  # 検証だけでは実モデルは動かない
