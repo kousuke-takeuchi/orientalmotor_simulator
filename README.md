@@ -201,6 +201,51 @@ python3 -m omsim.apps.omsim_main --node 1 --node 2 --wiring pitakuru --web-port 
 **既知の制限**: 動力遮断後の減速はフリーランの慣性を模擬せず即座に 0 になります
 （電磁ブレーキが保持される前提。ブレーキ無しモーターの惰走は未対応）。
 
+## 運転モード (P4)
+
+`6060h` で切り替え、`6061h` に反映されます。サポートするモードは次のとおりです。
+
+| 値 | モード | 主なオブジェクト |
+|---|---|---|
+| 1 | pp (Profile Position) | `607Ah` 目標位置 / `6081h` プロファイル速度 / `6083h`・`6084h` 加減速 |
+| 3 | pv (Profile Velocity) | `60FFh` 目標速度 |
+| 4 | tq (Profile Torque) | `6071h` 目標トルク / `6087h` トルク傾き / `6072h` 最大トルク |
+| 6 | hm (Homing) | `6098h` 方式 / `6099h` 速度 / `609Ah` 加速度 / `607Ch` 原点オフセット |
+
+**Statusword の bit12 / 13 / 15 はモードで意味が変わります**（pv: Speed is 0 / pp: Set point
+acknowledge・Following error / hm: Homing attained・Homing error / 共通: bit15 Torque limit）。
+Web のステータスモニタも `6061h` を見て名前を切り替えます。
+
+### pp の使い方
+
+`607Ah` に目標位置を書き、Controlword の bit4（New set point）を 0→1 にすると動き出します。
+bit5=1 で運転中の即時差し替え、bit6=1 で相対位置決め、bit8=1 で `605Dh` に従った減速停止。
+
+### hm の使い方
+
+サポートする方式は **17 / 18**（リミットセンサ）、**24 / 28**（HOME センサ）、
+**35 / 37**（現在位置を原点。既定は 37）。index pulse (ZSG-N) を使う 1 / 2 / 8 / 12 と
+メーカ固有の −1 は未実装で、書き込むと SDO abort になります。
+センサ入力は `DriverModel.set_limit_inputs(fw_ls=..., rv_ls=..., home=...)` で与えます
+（CN4 の実配線は P5）。
+
+### 停止動作の option code
+
+`605Ah`（quick stop、既定 2）/ `605Bh` / `605Ch` / `605Dh`（0 は仕様上予約なので abort）/
+`605Eh`。`605Ah` は実際に効きます（`2` は `6085h` のランプ、`1` は通常減速、`0`/`−1` は即時、
+`5`/`6` は quick-stop-active に留まる）。`−3`/`−2` は 4735h/4736h の単位が未確認のため abort します。
+`605Bh`/`605Ch`/`605Eh` は値の保持のみで、理由は `--list-stubs` に出ます。
+
+### リミットと touch probe
+
+- `607Dh` ソフトウェアリミットは**原点復帰完了後にだけ**有効（`Min ≥ Max` や両方 0 は無効）。
+  `607Ch` 原点オフセットを引いた値と比較します。
+- リミットセンサに当たると `Statusword` bit11（Internal limit active）が立ち、
+  その方向だけ止まります（反対方向へは動けます）。`60FDh` の bit0/1/2 で状態を読めます。
+- touch probe は `60B8h`（機能）/`60B9h`（状態）/`60BAh`-`60BDh`（ラッチ値）/
+  `60D5h`-`60D8h`（カウンタ）。トリガは `DriverModel.trigger_touch_probe(probe, edge)` で与えます。
+  ZSG-N をトリガ源にする設定は未実装のため abort します。
+
 ## 網羅率の確認
 
 EDS（オブジェクト辞書）に定義されたオブジェクトのうち、どこまで実装済みかを確認できます。
