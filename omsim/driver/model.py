@@ -7,6 +7,7 @@ import copy
 from omsim.driver.alarm_model import EMCY_HEARTBEAT_ERROR, AlarmModel
 from omsim.driver.errors import (
     ABORT_DEVICE_STATE,
+    ABORT_NO_DATA,
     ABORT_VALUE_RANGE,
     NotImplementedObjectError,
     ObjectAccessError,
@@ -426,7 +427,9 @@ class DriverModel(object):
     def _read_error_field(self, sub):
         history = self.alarms.history
         if sub < 1 or sub > len(history):
-            return 0
+            # CiA301 では「データが無い」ことは 0 ではなく abort で表す。
+            raise ObjectAccessError(
+                ABORT_NO_DATA, "1003h:{:02X} はまだ記録がありません".format(sub))
         return history[sub - 1]
 
     # sub1〜10 は全て同じ「履歴の sub 番目を返す」処理のため、
