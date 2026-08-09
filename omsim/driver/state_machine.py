@@ -36,6 +36,9 @@ BIT_REMOTE = 9
 BIT_TARGET_REACHED = 10
 BIT_INTERNAL_LIMIT = 11
 BIT_OPERATION_MODE_SPECIFIC_12 = 12
+# bit13 も pp では Following error、hm では Homing error とモードで意味が変わる。
+BIT_OPERATION_MODE_SPECIFIC_13 = 13
+BIT_TORQUE_LIMIT = 15
 
 
 def _command(controlword):
@@ -70,6 +73,9 @@ class Cia402StateMachine(object):
         # 異なる (pp/hm/tq は P4 で対応) ため、モード側 (DriverModel) から
         # 値を設定してもらう属性として持つ。既定は False (速度は 0 でない)。
         self.operation_mode_specific_12 = False
+        self.operation_mode_specific_13 = False
+        # bit15 TLC: 出力トルクが最大トルク / トルク制限値に当たっている
+        self.torque_limit_active = False
         self.remote = True
         self._fault_active = False
         self._controlword = 0x0000
@@ -98,6 +104,10 @@ class Cia402StateMachine(object):
             word |= 1 << BIT_INTERNAL_LIMIT
         if self.operation_mode_specific_12:
             word |= 1 << BIT_OPERATION_MODE_SPECIFIC_12
+        if self.operation_mode_specific_13:
+            word |= 1 << BIT_OPERATION_MODE_SPECIFIC_13
+        if self.torque_limit_active:
+            word |= 1 << BIT_TORQUE_LIMIT
         return word
 
     def stop_completed(self):

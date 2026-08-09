@@ -211,7 +211,8 @@ def test_stub_objects_lists_the_four_unimplemented_objects():
     # MotorPlant が参照しないため運転には効かない。「実装したつもりで
     # 呼ばれない」ことを --list-stubs で機械的に確認できるよう、スタブとして
     # 登録されている（P1 時点ではここが漏れていた）。
-    assert (0x6072, 0) in stub_keys
+    # 6072h は tq モード実装 (P4) で実際にトルク制限として効くようになった
+    assert (0x6072, 0) not in stub_keys
     assert (0x4032, 0) in stub_keys
 
 

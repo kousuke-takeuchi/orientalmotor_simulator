@@ -27,6 +27,25 @@ class MotorPlant(object):
         self.torque_permille = 0.0
         self._position = 0.0
 
+    def step_torque(self, dt, torque_permille, max_velocity):
+        """トルク指令で駆動する (tq モード)。
+
+        速度指令ではなくトルクから加速度を出す。トルクと加速度の関係は
+        step() のトルク推定 (torque = inertia_gain * accel + load) の逆算で、
+        同じ係数を使う (2 つのモードでモーターの重さが変わらないように)。
+        """
+        if not self.excited:
+            self.step(dt, 0.0)
+            return
+        net = float(torque_permille) - self.load_torque_permille
+        acceleration = net / self.inertia_gain if self.inertia_gain else 0.0
+        self.velocity += acceleration * dt
+        limit = abs(float(max_velocity))
+        if limit and abs(self.velocity) > limit:
+            self.velocity = limit if self.velocity > 0 else -limit
+        self._position += self.velocity * dt
+        self.torque_permille = float(torque_permille)
+
     def step(self, dt, command_velocity):
         target = float(command_velocity) if self.excited else 0.0
         previous = self.velocity

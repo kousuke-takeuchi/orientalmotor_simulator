@@ -72,7 +72,7 @@ def test_queued_write_rejected_for_unimplemented_mode_becomes_sdo_abort(od):
     model = DriverModel(node_id=1)
     node = build_local_node(1, od, model, queue=queue)
     with pytest.raises(canopen.SdoAbortedError) as exc:
-        node.set_data(0x6060, 0, od[0x6060].encode_raw(4))   # tq は未実装
+        node.set_data(0x6060, 0, od[0x6060].encode_raw(6))   # hm は未実装
     assert exc.value.code == ABORT_DEVICE_STATE
     assert queue.pending_count() == 0
 

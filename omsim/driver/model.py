@@ -26,6 +26,7 @@ from omsim.driver.objects import ObjectRouter
 from omsim.driver.operation import (
     OperationContext,
     ProfilePositionMode,
+    ProfileTorqueMode,
     ProfileVelocityMode,
 )
 from omsim.driver.pdo import (
@@ -116,6 +117,9 @@ class DriverModel(object):
         self.direct_torque_limit_permille = 10000
         self.digital_outputs = 0
         self.profile_velocity_rpm = 1
+        # tq (Profile Torque) 用
+        self.target_torque = 0
+        self.torque_slope = 0
         # pp (Profile Position) 用
         self.target_position = 0
         self.end_velocity = 0
@@ -564,6 +568,7 @@ class DriverModel(object):
     _OPERATION_MODES = {
         MODE_PV: ProfileVelocityMode,
         MODE_PP: ProfilePositionMode,
+        MODE_TQ: ProfileTorqueMode,
     }
 
     @router.writer(0x6060)
@@ -620,15 +625,15 @@ class DriverModel(object):
         return _clamp_int32(round(self.plant.torque_permille))
 
     _TORQUE_LIMIT_STUB_REASON = (
-        "P4/P5: 値は保持・読み返しできるが MotorPlant がトルク制限を"
-        "一切参照しないため、運転(速度追従)には効かない"
+        "P5: tq (トルク) モードではトルク制限として実際に効くが、pv / pp の"
+        "速度・位置追従では MotorPlant がトルク制限を参照しないため効かない"
     )
 
-    @router.reader(0x6072, stub=_TORQUE_LIMIT_STUB_REASON)
+    @router.reader(0x6072)
     def _read_max_torque(self, sub):
         return self.max_torque_permille
 
-    @router.writer(0x6072, stub=_TORQUE_LIMIT_STUB_REASON)
+    @router.writer(0x6072)
     def _write_max_torque(self, sub, value):
         # EDS: LowLimit=0 HighLimit=10000 (千分率、1000 = 定格トルク)
         if not (0 <= int(value) <= 10000):
@@ -686,6 +691,35 @@ class DriverModel(object):
     @router.reader(0x409B, stub="P6: 主電源電流のモデル未実装。常に 0 [mA] を返すだけ")
     def _read_main_power_current(self, sub):
         return 0
+
+    @router.reader(0x6071)
+    def _read_target_torque(self, sub):
+        return self.target_torque
+
+    @router.writer(0x6071)
+    def _write_target_torque(self, sub, value):
+        # EDS/HP-5143E: -1000..1000 (0.1% 単位)
+        if not (-1000 <= int(value) <= 1000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6071h は -1000〜1000")
+        self.target_torque = int(value)
+
+    @router.reader(0x6074)
+    def _read_torque_demand(self, sub):
+        demand = getattr(self.operation, "torque_demand", None)
+        # tq 以外のモードでは要求トルクという概念が無いので実トルクを返す。
+        if demand is None:
+            return _clamp_int32(round(self.plant.torque_permille))
+        return demand
+
+    @router.reader(0x6087)
+    def _read_torque_slope(self, sub):
+        return self.torque_slope
+
+    @router.writer(0x6087)
+    def _write_torque_slope(self, sub, value):
+        if not (0 <= int(value) <= 1000000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "6087h は 0〜1,000,000")
+        self.torque_slope = int(value)
 
     @router.reader(0x607A)
     def _read_target_position(self, sub):

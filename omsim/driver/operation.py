@@ -206,3 +206,95 @@ class ProfilePositionMode(OperationMode):
         # bit12 SPA: 受理した set-point を処理中かどうか。
         ctx.state_machine.operation_mode_specific_12 = (
             self._active_target is not None or self._pending_target is not None)
+
+
+class ProfileTorqueMode(OperationMode):
+    """Profile Torque Mode (tq)。HP-5143E 7.4 (p47-49)。
+
+    6071h Target torque (0.1% 単位) を 6087h Torque slope (0.1%/s) の傾きで
+    追い、6072h Max torque と 4032h のトルク制限値で頭打ちにする。
+    Controlword bit8 HALT は「6087h の傾きでトルクを 0 へ落とす」。
+    """
+
+    MODE_CODE = 4
+
+    CW_HALT = 1 << 8
+
+    def __init__(self):
+        self._demand = 0.0
+        self._halted = False
+        self._limited = False
+
+    @property
+    def mode_code(self):
+        return self.MODE_CODE
+
+    def _limit(self, ctx, value):
+        params = ctx.params
+        ceiling = min(params.max_torque_permille, params.direct_torque_limit_permille)
+        if abs(value) > ceiling:
+            self._limited = True
+            return ceiling if value > 0 else -ceiling
+        self._limited = False
+        return value
+
+    def step(self, dt, ctx):
+        params = ctx.params
+        controlword = ctx.state_machine.controlword
+        self._halted = bool(controlword & self.CW_HALT)
+
+        if not ctx.state_machine.is_operation_enabled:
+            target = 0.0
+        elif self._halted:
+            target = 0.0
+        else:
+            target = float(params.target_torque)
+        target = self._limit(ctx, target)
+
+        slope = float(params.torque_slope)
+        if slope <= 0.0:
+            # 6087h = 0 (既定) は傾き無し = 即時反映として扱う。
+            self._demand = target
+        else:
+            step_limit = slope * dt
+            delta = target - self._demand
+            if abs(delta) <= step_limit:
+                self._demand = target
+            else:
+                self._demand += step_limit if delta > 0 else -step_limit
+
+        if self._halted or not ctx.state_machine.is_operation_enabled:
+            # HP-5143E 7.4.3 の HALT は 6087h の傾きでトルクを落とすが、
+            # bit10 の意味は「モーターが停止した」であり、605Dh (Halt option
+            # code = 1: slow down ramp) の減速で実際に止まるところまでが
+            # 停止動作。トルクを抜くだけだと無負荷モデルでは永久に惰走する。
+            ctx.profile.acceleration = ctx.units.rpm_to_internal(
+                params.profile_acceleration_rpm_s)
+            ctx.profile.deceleration = ctx.units.rpm_to_internal(
+                params.effective_deceleration_rpm_s)
+            ctx.profile.set_target(0.0)
+            ctx.profile.step(dt)
+            ctx.plant.step(dt, ctx.profile.command)
+            ctx.plant.torque_permille = self._demand
+            return
+
+        max_velocity = ctx.units.rpm_to_internal(params.profile_velocity_rpm)
+        ctx.plant.step_torque(dt, self._demand, max_velocity)
+        # 速度指令 (606Bh) は tq では意味を持たないので実速度に合わせておく
+        ctx.profile.reset(ctx.plant.velocity)
+
+    @property
+    def torque_demand(self):
+        return int(round(self._demand))
+
+    def apply_status_bits(self, ctx):
+        if self._halted:
+            ctx.state_machine.target_reached = (
+                abs(ctx.units.internal_to_rpm(ctx.plant.velocity))
+                <= ctx.params.velocity_threshold_rpm)
+        else:
+            ctx.state_machine.target_reached = (
+                self.torque_demand == self._limit(ctx, float(ctx.params.target_torque)))
+        ctx.state_machine.torque_limit_active = self._limited
+        ctx.state_machine.operation_mode_specific_12 = False
+        ctx.state_machine.operation_mode_specific_13 = False
