@@ -8,6 +8,8 @@ from omsim.driver.model import DriverModel
 from omsim.node.eds import DEFAULT_EDS_PATH, find_eds
 from omsim.sim.manager import NodeManager, NodeSpec
 from omsim.sim.recorder import Recorder, attach_recorder
+from omsim.sim.wiring import PRESETS as WIRING_PRESETS
+from omsim.sim.wiring import Cn4Wiring
 
 
 def format_stubs(stubs):
@@ -67,6 +69,9 @@ def parse_args(argv):
         help="指定するとブラウザ用の Web サーバをこのポートで起動する",
     )
     parser.add_argument("--web-host", default="127.0.0.1")
+    parser.add_argument(
+        "--wiring", default="standard", choices=sorted(WIRING_PRESETS),
+        help="CN4 の HWTO 配線 (standard: 2重系 / pitakuru: 片系 / none: ジャンパ短絡)")
     args = parser.parse_args(argv)
 
     eds_path = find_eds(args.eds)
@@ -108,7 +113,9 @@ def main(argv=None):
 
     recorder = Recorder(args.record)
     network = open_network(args.channel, args.interface, args.bitrate)
-    manager = NodeManager(args.nodes, network=network, realtime=True)
+    manager = NodeManager(
+        args.nodes, network=network, realtime=True,
+        wiring=Cn4Wiring.preset(args.wiring))
     attach_recorder(network, recorder, manager.clock)
     manager.start()
 

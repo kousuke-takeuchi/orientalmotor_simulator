@@ -205,3 +205,57 @@ def test_snapshot_exposes_increments_per_revolution_for_the_3d_view():
 
     snapshot = DriverModel(node_id=1).snapshot()
     assert snapshot["increments_per_revolution"] == 3600
+
+
+# --- 配線 / 安全リレーの操作 (P3.5) ---
+
+def test_wiring_endpoint_reports_the_current_wiring():
+    client, _manager, recorder = make_client()
+    body = client.get("/api/wiring").json()
+    assert body["preset"] == "standard"
+    assert body["hwto1"]["source"] == "relay"
+    assert body["hwto1"]["pins"] == "CN4 11/12"
+    assert body["relay"] is True
+    assert body["inputs"] == {"hwto1_on": True, "hwto2_on": True}
+    recorder.close()
+
+
+def test_wiring_endpoint_can_switch_to_the_pitakuru_preset():
+    client, manager, recorder = make_client()
+    body = client.post("/api/wiring", json={"preset": "pitakuru"}).json()
+    assert body["preset"] == "pitakuru"
+    assert manager.wiring.hwto2 == "jumper"
+    recorder.close()
+
+
+def test_wiring_endpoint_can_drop_the_relay():
+    client, manager, recorder = make_client()
+    client.post("/api/wiring", json={"preset": "pitakuru"})
+    body = client.post("/api/wiring", json={"relay": False}).json()
+    assert body["relay"] is False
+    assert body["inputs"] == {"hwto1_on": False, "hwto2_on": True}
+    manager.step()
+    assert manager.models[1].hwto.hwto1_on is False
+    recorder.close()
+
+
+def test_wiring_endpoint_can_set_each_channel_individually():
+    client, manager, recorder = make_client()
+    body = client.post("/api/wiring", json={"hwto1": "open", "hwto2": "jumper"}).json()
+    assert body["hwto1"]["source"] == "open"
+    assert body["preset"] is None  # 既知のプリセットに一致しない組み合わせ
+    recorder.close()
+
+
+def test_wiring_endpoint_rejects_an_unknown_source():
+    client, _manager, recorder = make_client()
+    response = client.post("/api/wiring", json={"hwto1": "battery"})
+    assert response.status_code == 400
+    assert "battery" in response.json()["detail"]
+    recorder.close()
+
+
+def test_wiring_endpoint_rejects_an_unknown_preset():
+    client, _manager, recorder = make_client()
+    assert client.post("/api/wiring", json={"preset": "nonsense"}).status_code == 400
+    recorder.close()

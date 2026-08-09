@@ -1,0 +1,18 @@
+name: 走行中に安全リレーを切って HWTO で止める
+nodes: [1, 2]
+steps:
+  - nmt: start
+  - sdo_write: {index: 0x6060, value: 3}
+  - sdo_write: {index: 0x6040, value: 0x0006}
+  - sdo_write: {index: 0x6040, value: 0x0007}
+  - sdo_write: {index: 0x6040, value: 0x000F}
+  - sdo_write: {node: 1, index: 0x60FF, value: 100}
+  - sdo_write: {node: 2, index: 0x60FF, value: 50}
+  - expect: {node: 1, index: 0x606C, value: 100, tolerance: 3, timeout: 3.0}
+  # 安全リレーを切る -> HWTO1 が OFF -> 無励磁 (フリーラン) + ブレーキ保持
+  - relay: off
+  - expect: {node: 1, index: 0x606C, value: 0, tolerance: 2, timeout: 3.0}
+  - expect: {node: 2, index: 0x606C, value: 0, tolerance: 2, timeout: 3.0}
+  # 60FDh bit3 (HWTO 入力 active) が立っていること
+  - expect: {node: 1, index: 0x60FD, mask: 0x8, value: 0x8, timeout: 1.0}
+  - relay: on

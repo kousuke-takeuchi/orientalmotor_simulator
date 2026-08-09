@@ -196,6 +196,7 @@ function onMessage(payload) {
   pushHistory(payload.nodes);
   renderCharts(payload.nodes);
 
+  renderHwtoStatus(payload.nodes);
   if (window.omsimMotor3d) window.omsimMotor3d.update(payload);
 
   state.frames = payload.frames;
@@ -220,3 +221,76 @@ function connect() {
 }
 
 connect();
+
+// --- CN4 配線 / HWTO パネル (P3.5) ---
+
+var wiring = { relay: true };
+
+function renderWiring(info) {
+  wiring = info;
+  document.getElementById("wiring-preset").value = info.preset || "";
+  document.getElementById("wiring-hwto1").value = info.hwto1.source;
+  document.getElementById("wiring-hwto2").value = info.hwto2.source;
+  document.getElementById("relay-toggle").textContent =
+    info.relay ? "安全リレーを切る" : "安全リレーを入れる";
+}
+
+function postWiring(body) {
+  fetch("/api/wiring", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  }).then(function (response) {
+    if (!response.ok) return response.json().then(function (err) {
+      throw new Error(err.detail || "配線の変更に失敗しました");
+    });
+    return response.json();
+  }).then(renderWiring).catch(function (err) {
+    document.getElementById("hwto-status").textContent = String(err.message || err);
+  });
+}
+
+document.getElementById("wiring-preset").addEventListener("change", function (event) {
+  postWiring({ preset: event.target.value });
+});
+["wiring-hwto1", "wiring-hwto2"].forEach(function (id) {
+  document.getElementById(id).addEventListener("change", function () {
+    postWiring({
+      hwto1: document.getElementById("wiring-hwto1").value,
+      hwto2: document.getElementById("wiring-hwto2").value
+    });
+  });
+});
+document.getElementById("relay-toggle").addEventListener("click", function () {
+  postWiring({ relay: !wiring.relay });
+});
+
+function renderHwtoStatus(nodes) {
+  var container = document.getElementById("hwto-status");
+  container.innerHTML = "";
+  Object.keys(nodes).sort().forEach(function (nodeId) {
+    var snap = nodes[nodeId];
+    var hwto = snap.hwto || {};
+    var row = el("div", "hwto-row");
+    row.appendChild(el("span", "hwto-node", "node " + nodeId));
+    [
+      ["HWTO1 入力", hwto.hwto1_on, true],
+      ["HWTO2 入力", hwto.hwto2_on, true],
+      ["動力遮断", snap.power_cut, false],
+      ["ETO", hwto.eto_active, false],
+      ["EDM-MON", hwto.edm_mon, false],
+      ["HWTOIN-MON", hwto.hwtoin_mon, false],
+      ["ブレーキ保持", snap.brake_engaged, false]
+    ].forEach(function (item) {
+      var on = Boolean(item[1]);
+      // 入力は「ON が正常」、それ以外は「ON が異常寄り」なので色を分ける
+      var good = item[2] ? on : !on;
+      var chip = el("span", "lamp " + (good ? "lamp-on" : "lamp-warn"),
+        item[0] + ": " + (on ? "ON" : "OFF"));
+      row.appendChild(chip);
+    });
+    container.appendChild(row);
+  });
+}
+
+fetch("/api/wiring").then(function (r) { return r.json(); }).then(renderWiring);

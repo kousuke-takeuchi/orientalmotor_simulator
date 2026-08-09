@@ -100,3 +100,18 @@ def test_web_port_is_parsed():
 
 def test_web_host_defaults_to_localhost():
     assert parse_args([]).web_host == "127.0.0.1"
+
+
+def test_wiring_defaults_to_standard():
+    assert parse_args([]).wiring == "standard"
+
+
+def test_wiring_accepts_the_pitakuru_preset():
+    assert parse_args(["--wiring", "pitakuru"]).wiring == "pitakuru"
+
+
+def test_wiring_rejects_an_unknown_preset():
+    import pytest
+
+    with pytest.raises(SystemExit):
+        parse_args(["--wiring", "nonsense"])
