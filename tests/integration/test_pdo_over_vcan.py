@@ -35,3 +35,23 @@ def test_tpdo1_over_vcan_reflects_statusword_after_change(stepped_sim, master):
         assert msg.arbitration_id == 0x180 + node_id
     finally:
         bus.shutdown()
+
+
+def test_sync_producer_transmits_periodically(stepped_sim, master):
+    import can
+
+    node_id = 1
+    model = stepped_sim.models[node_id]
+    model.write_object(0x1005, 0, 0x80 | (1 << 30))
+    model.write_object(0x1006, 0, 5000)  # 5ms 周期
+
+    bus = can.interface.Bus(channel="vcan0", interface="socketcan",
+                            can_filters=[{"can_id": 0x80, "can_mask": 0x7FF}])
+    try:
+        for _ in range(20):
+            stepped_sim.step()
+        msg = bus.recv(timeout=1.0)
+        assert msg is not None
+        assert msg.arbitration_id == 0x80
+    finally:
+        bus.shutdown()

@@ -272,6 +272,34 @@ class DriverModel(object):
     def _read_error_register(self, sub):
         return self.alarms.error_register
 
+    # --- SYNC (1005h / 1006h) ---
+
+    _SYNC_PRODUCER_BIT = 1 << 30
+
+    @router.reader(0x1005)
+    def _read_sync_cob_id(self, sub):
+        value = self.sync_cob_id & 0x7FF
+        if self.sync_producer_enabled:
+            value |= self._SYNC_PRODUCER_BIT
+        return value
+
+    @router.writer(0x1005)
+    def _write_sync_cob_id(self, sub, value):
+        raw = int(value) & 0xFFFFFFFF
+        self.sync_cob_id = raw & 0x7FF
+        self.sync_producer_enabled = bool(raw & self._SYNC_PRODUCER_BIT)
+
+    @router.reader(0x1006)
+    def _read_sync_period(self, sub):
+        return self.sync_period_us
+
+    @router.writer(0x1006)
+    def _write_sync_period(self, sub, value):
+        period = int(value)
+        if not (0 <= period <= 1000000):
+            raise ObjectAccessError(ABORT_VALUE_RANGE, "1006h は 0-1,000,000 μs")
+        self.sync_period_us = period
+
     @router.reader(0x1008)
     def _read_device_name(self, sub):
         return self.DEVICE_NAME

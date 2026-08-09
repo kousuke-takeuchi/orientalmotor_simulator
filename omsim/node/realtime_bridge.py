@@ -57,6 +57,11 @@ class _TpdoRuntime(object):
         self.last_transmit_time = None
 
 
+class _SyncProducerState(object):
+    def __init__(self):
+        self.next_due = None
+
+
 class _NodeListener(can.Listener):
     """1 ノードぶんの RPDO / SYNC 受信を捌く。node guarding / Heartbeat
     consumer の受信は Task 11 でこのクラスに追加する。"""
@@ -102,6 +107,7 @@ class RealtimeBridge(object):
     def __init__(self):
         self._listeners = {}
         self._tpdo_runtime = {}  # node_id -> [runtime_slot0..3]
+        self._sync_producer = {}  # node_id -> _SyncProducerState
 
     def _make_listener(self, model, od, queue, sync_counter, node_id):
         return _NodeListener(model, od, queue, sync_counter)
@@ -114,6 +120,7 @@ class RealtimeBridge(object):
         listener = self._make_listener(model, od, queue, sync_counter, model.node_id)
         self._listeners[model.node_id] = listener
         self._tpdo_runtime[model.node_id] = self._make_tpdo_runtime()
+        self._sync_producer[model.node_id] = _SyncProducerState()
         network = node.network
         network.listeners.append(listener)
         notifier = getattr(network, "notifier", None)
@@ -154,8 +161,23 @@ class RealtimeBridge(object):
                 # RTR 応答側で行う)。ここではサンプルだけ取る。
                 runtime.last_bytes = _encode_tpdo(od, model, mapping)
 
+    def _maybe_send_sync(self, node_id, model, network, sim_time):
+        """SYNC producer (1005h bit30 + 1006h 周期) が有効なら SYNC を送る。"""
+        state = self._sync_producer.setdefault(node_id, _SyncProducerState())
+        if not (model.sync_producer_enabled and model.sync_period_us > 0):
+            state.next_due = None
+            return
+        period_seconds = model.sync_period_us / 1e6
+        if state.next_due is None:
+            state.next_due = sim_time
+        if sim_time >= state.next_due:
+            network.send_message(model.sync_cob_id & 0x7FF, [])
+            state.next_due = sim_time + period_seconds
+
     def step(self, node_id, model, network, od, sim_time):
-        """1ms ごとに呼ぶ: 非同期系 TPDO (0xFE/0xFF) の inhibit/event timer を判定する。"""
+        """1ms ごとに呼ぶ: SYNC producer と、非同期系 TPDO (0xFE/0xFF) の
+        inhibit/event timer を判定する。"""
+        self._maybe_send_sync(node_id, model, network, sim_time)
         runtimes = self._tpdo_runtime[node_id]
         for slot, comm in enumerate(model.tpdo_comm):
             if not comm.valid or comm.transmission_type not in (0xFE, 0xFF):
