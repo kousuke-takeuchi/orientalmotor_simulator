@@ -208,6 +208,8 @@ function onMessage(payload) {
   pushHistory(payload.nodes);
   renderCharts(payload.nodes);
 
+  renderAlarms(payload.nodes);
+  renderIo(payload.nodes);
   renderHwtoStatus(payload.nodes);
   if (window.omsimMotor3d) window.omsimMotor3d.update(payload);
 
@@ -306,3 +308,69 @@ function renderHwtoStatus(nodes) {
 }
 
 fetch("/api/wiring").then(function (r) { return r.json(); }).then(renderWiring);
+
+// --- アラームモニタ / I/O モニタ (P6) ---
+
+// HP-5143E 60FDh/60FEh 実測の既定機能名。bit16-31 が R-IN / R-OUT。
+var R_IN_NAMES = [
+  "S-ON", "PLOOP-MODE", "TRQ-LMT", "CLR", "QSTOP", "STOP", "FREE", "ALM-RST",
+  "D-SEL0", "D-SEL1", "D-SEL2", "D-SEL3", "D-SEL4", "D-SEL5", "D-SEL6", "D-SEL7"
+];
+var R_OUT_NAMES = [
+  "SON-MON", "PLOOP-MON", "TRQ-LMTD", "RDY-DD-OPE", "ABSPEN", "STOP_R",
+  "FREE_R", "ALM-A", "SYS-BSY", "IN-POS", "RDY-HOME-OPE", "RDY-FWRV-OPE",
+  "RDY-SD-OPE", "MOVE", "VA", "TLC"
+];
+var R_IO_BASE_BIT = 16;
+
+function renderAlarms(nodes) {
+  var container = document.getElementById("alarms");
+  container.innerHTML = "";
+  Object.keys(nodes).sort().forEach(function (nodeId) {
+    var snap = nodes[nodeId];
+    var card = el("div", "node");
+    var active = snap.alarm === null || snap.alarm === undefined
+      ? "なし"
+      : "0x" + Number(snap.alarm).toString(16).toUpperCase() +
+        (snap.alarm_name ? " " + snap.alarm_name : "");
+    card.appendChild(el("h3", null, "node " + nodeId + " / 現在アラーム: " + active));
+
+    var history = snap.alarm_history_decoded || [];
+    if (!history.length) {
+      card.appendChild(el("div", "note", "履歴 (1003h): なし"));
+    } else {
+      var list = el("div", "bits");
+      history.forEach(function (entry, position) {
+        list.appendChild(el("span", "bit",
+          (position + 1) + ": 0x" + entry.code.toString(16).toUpperCase() +
+          " " + (entry.name || "") +
+          " (EMCY 0x" + entry.emcy.toString(16).toUpperCase() + ")"));
+      });
+      card.appendChild(list);
+    }
+    container.appendChild(card);
+  });
+}
+
+function renderIoRow(label, names, value) {
+  var row = el("div", "hwto-row");
+  row.appendChild(el("span", "hwto-node", label));
+  names.forEach(function (name, bit) {
+    var on = ((value >>> (R_IO_BASE_BIT + bit)) & 1) === 1;
+    row.appendChild(el("span", "lamp" + (on ? " lamp-on" : ""), name));
+  });
+  return row;
+}
+
+function renderIo(nodes) {
+  var container = document.getElementById("io");
+  container.innerHTML = "";
+  Object.keys(nodes).sort().forEach(function (nodeId) {
+    var snap = nodes[nodeId];
+    var card = el("div", "node");
+    card.appendChild(el("h3", null, "node " + nodeId));
+    card.appendChild(renderIoRow("R-IN", R_IN_NAMES, Number(snap.remote_inputs) || 0));
+    card.appendChild(renderIoRow("R-OUT", R_OUT_NAMES, Number(snap.remote_outputs) || 0));
+    container.appendChild(card);
+  });
+}

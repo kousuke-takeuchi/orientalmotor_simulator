@@ -563,7 +563,22 @@ class DriverModel(object):
                 "hwtoin_mon": self.hwto.hwtoin_mon,
             },
             "alarm": self.alarms.active_alarm,
+            "alarm_name": (
+                ALARM_CODES[self.alarms.active_alarm][0]
+                if self.alarms.active_alarm in ALARM_CODES else None),
             "alarm_history": self.alarms.history,
+            # 1003h のパック値 (下位=EMCY / 上位=メーカ固有) を Web が
+            # 分解しなくて済むよう、名前つきで展開しておく。
+            "alarm_history_decoded": [
+                {
+                    "emcy": entry & 0xFFFF,
+                    "code": (entry >> 16) & 0xFFFF,
+                    "name": ALARM_CODES.get((entry >> 16) & 0xFFFF, ("", ))[0],
+                }
+                for entry in self.alarms.history
+            ],
+            "remote_inputs": self.read_object(0x403E),
+            "remote_outputs": self.read_object(0x403F),
         }
 
     # --- テストと Web からアラームを注入する口 ---

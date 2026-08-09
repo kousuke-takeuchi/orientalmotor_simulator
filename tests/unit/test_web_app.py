@@ -259,3 +259,19 @@ def test_wiring_endpoint_rejects_an_unknown_preset():
     client, _manager, recorder = make_client()
     assert client.post("/api/wiring", json={"preset": "nonsense"}).status_code == 400
     recorder.close()
+
+
+def test_snapshot_exposes_alarm_names_and_remote_io():
+    """Web のアラームモニタ / I/O モニタが表示に必要な情報。"""
+    from omsim.driver.model import DriverModel
+
+    model = DriverModel(node_id=1)
+    model.step(0.001)
+    model.inject_alarm(0x30)
+    snapshot = model.snapshot()
+    assert snapshot["alarm"] == 0x30
+    assert snapshot["alarm_name"] == "Overload"
+    assert snapshot["alarm_history_decoded"][0] == {
+        "emcy": 0xFF30, "code": 0x30, "name": "Overload"}
+    assert "remote_inputs" in snapshot
+    assert "remote_outputs" in snapshot
