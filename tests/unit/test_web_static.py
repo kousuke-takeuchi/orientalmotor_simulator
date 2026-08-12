@@ -72,6 +72,36 @@ def test_app_js_has_a_waveform_buffer_and_canvas_drawing():
     assert "drawChart" in js
 
 
+def test_waveforms_are_drawn_on_a_single_canvas():
+    """波形は 1 枚のグラフにまとめる。"""
+    html = _read("index.html")
+    assert 'id="chart"' in html
+    assert html.count("<canvas") == 1
+    js = _read("app.js")
+    assert "visibleTraces" in js
+    assert "renderChart" in js
+
+
+def test_each_waveform_has_a_checkbox():
+    """系列ごとにチェックボックスで表示を切り替えられる。"""
+    html = _read("index.html")
+    assert 'id="chart-toggles"' in html
+    js = _read("app.js")
+    assert "renderChartToggles" in js
+    assert 'box.type = "checkbox"' in js
+    assert "chartVisible" in js
+    # チェックを外したら再描画すること
+    assert "chartVisible[key] = event.target.checked" in js
+
+
+def test_legend_shows_the_current_value_and_range():
+    """系列ごとに自動スケールするので、凡例に現在値と範囲を出す。"""
+    js = _read("app.js")
+    assert "renderChartLegend" in js
+    assert "現在 " in js
+    assert "範囲 " in js
+
+
 def test_app_js_charts_velocity_position_and_torque():
     js = _read("app.js")
     assert "SERIES" in js
@@ -242,3 +272,14 @@ def test_app_js_only_asks_for_wiring_in_normal_mode():
     assert "wiringRequested" in js
     assert "response.ok" in js
     assert 'getElementById("pane-hwto").hidden = true' in js
+
+
+def test_traces_of_the_same_unit_share_one_scale():
+    """同じ単位の系列は共通スケールにする。
+
+    トレースごとに正規化すると、一定値の速度が 2 本あったときに両方とも
+    中央の直線になって重なり、100 r/min と 50 r/min を見分けられない。
+    """
+    js = _read("app.js")
+    assert "scales[trace.seriesKey]" in js
+    assert "seriesKey: series.key" in js

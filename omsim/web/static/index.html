@@ -29,7 +29,13 @@
 
     <section id="pane-waveform">
       <h2>波形モニタ</h2>
-      <div id="charts"></div>
+      <p class="note">
+        表示する波形をチェックで切り替えられます。縦軸は系列ごとに自動スケール
+        (速度・位置・トルクは単位が違うため) で、凡例に現在値と表示範囲を出します。
+      </p>
+      <div id="chart-toggles" class="toolbar"></div>
+      <div id="chart-legend"></div>
+      <div class="chart"><canvas id="chart"></canvas></div>
     </section>
 
     <section id="pane-alarm">

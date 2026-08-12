@@ -55,63 +55,148 @@ function pushHistory(nodes) {
   });
 }
 
-function drawChart(canvas, values, color) {
+// どの波形を表示するか。キーは "nodeId/系列キー"。
+// 既定は速度だけ ON にしておく (全部出すと初見で読めないため)。
+var chartVisible = {};
+
+function traceKey(nodeId, seriesKey) {
+  return nodeId + "/" + seriesKey;
+}
+
+// node ごとに線の濃さを変えて、同じ系列でもノードを見分けられるようにする。
+function traceColor(series, nodeIndex) {
+  var shades = ["", "88"];   // 2 台目以降は半透明
+  return series.color + (shades[nodeIndex % shades.length] || "");
+}
+
+function visibleTraces(nodes) {
+  var traces = [];
+  Object.keys(nodes).sort().forEach(function (nodeId, nodeIndex) {
+    SERIES.forEach(function (series) {
+      var key = traceKey(nodeId, series.key);
+      if (!chartVisible[key]) return;
+      traces.push({
+        key: key,
+        seriesKey: series.key,
+        label: "node " + nodeId + " / " + series.label,
+        color: traceColor(series, nodeIndex),
+        values: (chartHistory[nodeId] || {})[series.key] || []
+      });
+    });
+  });
+  return traces;
+}
+
+function drawChart(canvas, traces) {
   var ctx = canvas.getContext("2d");
   var width = canvas.width = canvas.clientWidth;
   var height = canvas.height = canvas.clientHeight;
   ctx.clearRect(0, 0, width, height);
 
-  if (!values.length) return;
-
-  var min = Math.min.apply(null, values);
-  var max = Math.max.apply(null, values);
-  if (min === max) { min -= 1; max += 1; }
-  var span = max - min;
-
-  // 0 の基準線
-  if (min < 0 && max > 0) {
-    var zeroY = height - ((0 - min) / span) * height;
-    ctx.strokeStyle = "#2b313b";
-    ctx.beginPath();
-    ctx.moveTo(0, zeroY);
-    ctx.lineTo(width, zeroY);
-    ctx.stroke();
-  }
-
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
+  // 中央の基準線 (各系列は自分の min-max で正規化して描くので、0 ではなく
+  // 「表示範囲の中央」を示す線)
+  ctx.strokeStyle = "#2b313b";
   ctx.beginPath();
-  values.forEach(function (value, index) {
-    var x = (index / (HISTORY_POINTS - 1)) * width;
-    var y = height - ((value - min) / span) * height;
-    if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-  });
+  ctx.moveTo(0, height / 2);
+  ctx.lineTo(width, height / 2);
   ctx.stroke();
 
-  ctx.fillStyle = "#6b7480";
-  ctx.font = "10px sans-serif";
-  ctx.fillText(max.toFixed(1), 4, 10);
-  ctx.fillText(min.toFixed(1), 4, height - 3);
+  // スケールは「系列 (単位) ごと」に共通にする。トレースごとに正規化すると、
+  // 一定値の速度が 2 本あったときに両方とも中央の直線になって重なり、
+  // node 1 の 100 r/min と node 2 の 50 r/min を見分けられなくなる。
+  var scales = {};
+  traces.forEach(function (trace) {
+    if (!trace.values.length) return;
+    var scale = scales[trace.seriesKey];
+    var low = Math.min.apply(null, trace.values);
+    var high = Math.max.apply(null, trace.values);
+    if (!scale) {
+      scales[trace.seriesKey] = { min: low, max: high };
+    } else {
+      scale.min = Math.min(scale.min, low);
+      scale.max = Math.max(scale.max, high);
+    }
+  });
+  Object.keys(scales).forEach(function (seriesKey) {
+    var scale = scales[seriesKey];
+    if (scale.min === scale.max) { scale.min -= 1; scale.max += 1; }
+  });
+
+  traces.forEach(function (trace) {
+    var values = trace.values;
+    if (!values.length) return;
+    var scale = scales[trace.seriesKey];
+    var min = scale.min;
+    var max = scale.max;
+    var span = max - min;
+    trace.min = min;
+    trace.max = max;
+    trace.latest = values[values.length - 1];
+
+    ctx.strokeStyle = trace.color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    values.forEach(function (value, index) {
+      var x = (index / (HISTORY_POINTS - 1)) * width;
+      var y = height - ((value - min) / span) * height;
+      if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  });
 }
 
-function renderCharts(nodes) {
-  var container = document.getElementById("charts");
+function renderChartToggles(nodes) {
+  var container = document.getElementById("chart-toggles");
   Object.keys(nodes).sort().forEach(function (nodeId) {
     SERIES.forEach(function (series) {
-      var id = "chart-" + nodeId + "-" + series.key;
-      var wrapper = document.getElementById(id);
-      if (!wrapper) {
-        wrapper = el("div", "chart");
-        wrapper.id = id;
-        wrapper.appendChild(el("div", "chart-label",
-          "node " + nodeId + " / " + series.label));
-        wrapper.appendChild(document.createElement("canvas"));
-        container.appendChild(wrapper);
+      var key = traceKey(nodeId, series.key);
+      var id = "toggle-" + nodeId + "-" + series.key;
+      if (document.getElementById(id)) return;
+      if (chartVisible[key] === undefined) {
+        chartVisible[key] = series.key === "actual_velocity_rpm";
       }
-      drawChart(wrapper.querySelector("canvas"),
-        chartHistory[nodeId] ? chartHistory[nodeId][series.key] : [], series.color);
+      var label = el("label", "chart-toggle");
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.id = id;
+      box.checked = chartVisible[key];
+      box.addEventListener("change", function (event) {
+        chartVisible[key] = event.target.checked;
+        renderChart(state.nodes);
+      });
+      label.appendChild(box);
+      label.appendChild(el("span", null, " node " + nodeId + " / " + series.label));
+      container.appendChild(label);
     });
   });
+}
+
+function renderChartLegend(traces) {
+  var legend = document.getElementById("chart-legend");
+  legend.innerHTML = "";
+  if (!traces.length) {
+    legend.appendChild(el("div", "note", "表示する波形が選ばれていません。"));
+    return;
+  }
+  traces.forEach(function (trace) {
+    var row = el("div", "chart-legend-row");
+    var swatch = el("span", "chart-swatch");
+    swatch.style.background = trace.color;
+    row.appendChild(swatch);
+    var range = trace.min === undefined
+      ? "(データなし)"
+      : "現在 " + fixed(trace.latest, 1) +
+        " / 範囲 " + fixed(trace.min, 1) + " 〜 " + fixed(trace.max, 1);
+    row.appendChild(el("span", null, trace.label + "  " + range));
+    legend.appendChild(row);
+  });
+}
+
+function renderChart(nodes) {
+  renderChartToggles(nodes);
+  var traces = visibleTraces(nodes);
+  drawChart(document.getElementById("chart"), traces);
+  renderChartLegend(traces);
 }
 
 function el(tag, className, text) {
@@ -206,7 +291,7 @@ function onMessage(payload) {
   state.nodes = payload.nodes;
   renderStatus(payload.nodes);
   pushHistory(payload.nodes);
-  renderCharts(payload.nodes);
+  renderChart(payload.nodes);
 
   updateReplayFromPayload(payload);
   renderAlarms(payload.nodes);
