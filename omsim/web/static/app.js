@@ -40,8 +40,11 @@ var SERIES = [
 ];
 
 var chartHistory = {};  // nodeId -> { key -> [値] }
+var chartTimes = [];    // 各サンプルの sim_time [s]。X 軸ラベルに使う
 
-function pushHistory(nodes) {
+function pushHistory(nodes, simTime) {
+  chartTimes.push(Number(simTime) || 0);
+  if (chartTimes.length > HISTORY_POINTS) chartTimes.shift();
   Object.keys(nodes).forEach(function (nodeId) {
     if (!chartHistory[nodeId]) {
       chartHistory[nodeId] = {};
@@ -87,62 +90,165 @@ function visibleTraces(nodes) {
   return traces;
 }
 
+// 系列キーから単位の見出しを引く ("速度 [r/min]" -> "[r/min]")。
+function seriesUnit(seriesKey) {
+  var series = SERIES.filter(function (item) { return item.key === seriesKey; })[0];
+  if (!series) return "";
+  var match = series.label.match(/\[[^\]]*\]/);
+  return match ? match[0] : series.label;
+}
+
+// グラフの余白。左右に Y 軸、下に X 軸のラベルを置く。
+// top は単位の見出し (「[r/min]」など) を目盛りと重ねずに置くぶん。
+var CHART_MARGIN = { left: 58, right: 58, top: 26, bottom: 24 };
+var AXIS_COLOR = "#6b7480";
+var GRID_COLOR = "#232932";
+
+// 系列 (単位) ごとの共通スケールを作る。
+function traceScales(traces) {
+  var scales = {};
+  traces.forEach(function (trace) {
+    if (!trace.values.length) return;
+    var low = Math.min.apply(null, trace.values);
+    var high = Math.max.apply(null, trace.values);
+    var scale = scales[trace.seriesKey];
+    if (!scale) {
+      scales[trace.seriesKey] = { min: low, max: high, label: seriesUnit(trace.seriesKey) };
+    } else {
+      scale.min = Math.min(scale.min, low);
+      scale.max = Math.max(scale.max, high);
+    }
+  });
+  Object.keys(scales).forEach(function (key) {
+    var scale = scales[key];
+    if (scale.min === scale.max) { scale.min -= 1; scale.max += 1; }
+  });
+  return scales;
+}
+
+function drawGrid(ctx, plot) {
+  ctx.strokeStyle = GRID_COLOR;
+  ctx.lineWidth = 1;
+  for (var i = 0; i <= 4; i++) {
+    var y = plot.top + (plot.height * i) / 4;
+    ctx.beginPath();
+    ctx.moveTo(plot.left, y);
+    ctx.lineTo(plot.left + plot.width, y);
+    ctx.stroke();
+  }
+  for (var j = 0; j <= 4; j++) {
+    var x = plot.left + (plot.width * j) / 4;
+    ctx.beginPath();
+    ctx.moveTo(x, plot.top);
+    ctx.lineTo(x, plot.top + plot.height);
+    ctx.stroke();
+  }
+}
+
+// Y 軸の目盛りを描く。side は "left" か "right"。
+function drawYAxis(ctx, plot, scale, side, color) {
+  ctx.fillStyle = color;
+  ctx.font = "10px sans-serif";
+  ctx.textAlign = side === "left" ? "right" : "left";
+  ctx.textBaseline = "middle";
+  var x = side === "left" ? plot.left - 6 : plot.left + plot.width + 6;
+  for (var i = 0; i <= 4; i++) {
+    var value = scale.max - ((scale.max - scale.min) * i) / 4;
+    var y = plot.top + (plot.height * i) / 4;
+    ctx.fillText(fixed(value, 1), x, y);
+  }
+  // 単位の見出し (目盛りの上に離して置く)
+  ctx.textBaseline = "bottom";
+  ctx.fillText(scale.label, x, plot.top - 8);
+}
+
+function drawXAxis(ctx, plot, times) {
+  ctx.fillStyle = AXIS_COLOR;
+  ctx.font = "10px sans-serif";
+  ctx.textBaseline = "top";
+  var last = times.length ? times[times.length - 1] : 0;
+  var first = times.length ? times[0] : 0;
+  for (var i = 0; i <= 4; i++) {
+    var x = plot.left + (plot.width * i) / 4;
+    var seconds = first + ((last - first) * i) / 4;
+    ctx.textAlign = i === 0 ? "left" : (i === 4 ? "right" : "center");
+    ctx.fillText(fixed(seconds, 1) + " s", x, plot.top + plot.height + 6);
+  }
+}
+
+function drawLegend(ctx, plot, traces) {
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  var x = plot.left + 8;
+  var y = plot.top + 6;
+  traces.forEach(function (trace) {
+    ctx.fillStyle = trace.color;
+    ctx.fillRect(x, y + 5, 14, 3);
+    var text = trace.label;
+    if (trace.latest !== undefined) text += "  " + fixed(trace.latest, 1);
+    ctx.fillText(text, x + 20, y);
+    y += 14;
+  });
+}
+
 function drawChart(canvas, traces) {
   var ctx = canvas.getContext("2d");
   var width = canvas.width = canvas.clientWidth;
   var height = canvas.height = canvas.clientHeight;
   ctx.clearRect(0, 0, width, height);
 
-  // 中央の基準線 (各系列は自分の min-max で正規化して描くので、0 ではなく
-  // 「表示範囲の中央」を示す線)
-  ctx.strokeStyle = "#2b313b";
-  ctx.beginPath();
-  ctx.moveTo(0, height / 2);
-  ctx.lineTo(width, height / 2);
-  ctx.stroke();
+  var plot = {
+    left: CHART_MARGIN.left,
+    top: CHART_MARGIN.top,
+    width: Math.max(10, width - CHART_MARGIN.left - CHART_MARGIN.right),
+    height: Math.max(10, height - CHART_MARGIN.top - CHART_MARGIN.bottom)
+  };
+
+  drawGrid(ctx, plot);
+  drawXAxis(ctx, plot, chartTimes);
 
   // スケールは「系列 (単位) ごと」に共通にする。トレースごとに正規化すると、
   // 一定値の速度が 2 本あったときに両方とも中央の直線になって重なり、
   // node 1 の 100 r/min と node 2 の 50 r/min を見分けられなくなる。
-  var scales = {};
-  traces.forEach(function (trace) {
-    if (!trace.values.length) return;
-    var scale = scales[trace.seriesKey];
-    var low = Math.min.apply(null, trace.values);
-    var high = Math.max.apply(null, trace.values);
-    if (!scale) {
-      scales[trace.seriesKey] = { min: low, max: high };
-    } else {
-      scale.min = Math.min(scale.min, low);
-      scale.max = Math.max(scale.max, high);
-    }
-  });
-  Object.keys(scales).forEach(function (seriesKey) {
-    var scale = scales[seriesKey];
-    if (scale.min === scale.max) { scale.min -= 1; scale.max += 1; }
+  var scales = traceScales(traces);
+  var scaleKeys = Object.keys(scales);
+
+  // Y 軸は左右 2 本まで。3 つ目以降の単位は軸を出せないので凡例で読む。
+  var sides = ["left", "right"];
+  scaleKeys.slice(0, 2).forEach(function (key, index) {
+    var series = SERIES.filter(function (item) { return item.key === key; })[0];
+    drawYAxis(ctx, plot, scales[key], sides[index], series ? series.color : AXIS_COLOR);
   });
 
   traces.forEach(function (trace) {
     var values = trace.values;
     if (!values.length) return;
     var scale = scales[trace.seriesKey];
-    var min = scale.min;
-    var max = scale.max;
-    var span = max - min;
-    trace.min = min;
-    trace.max = max;
+    var span = scale.max - scale.min;
+    trace.min = scale.min;
+    trace.max = scale.max;
     trace.latest = values[values.length - 1];
+    trace.axis = scaleKeys.indexOf(trace.seriesKey) < 2
+      ? (scaleKeys.indexOf(trace.seriesKey) === 0 ? "左軸" : "右軸")
+      : "軸なし";
 
+    // 最新のサンプルを右端に合わせて描く。溜まっている点数で割ると、
+    // バッファが満杯になるまで線が途中で切れて X 軸ラベルとずれる。
+    var span_points = Math.max(1, chartTimes.length - 1);
     ctx.strokeStyle = trace.color;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     values.forEach(function (value, index) {
-      var x = (index / (HISTORY_POINTS - 1)) * width;
-      var y = height - ((value - min) / span) * height;
+      var fromRight = values.length - 1 - index;
+      var x = plot.left + plot.width - (fromRight / span_points) * plot.width;
+      var y = plot.top + plot.height - ((value - scale.min) / span) * plot.height;
       if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.stroke();
   });
+
+  drawLegend(ctx, plot, traces);
 }
 
 function renderChartToggles(nodes) {
@@ -172,6 +278,7 @@ function renderChartToggles(nodes) {
 }
 
 function renderChartLegend(traces) {
+  // 凡例そのものはグラフの中に描く。ここには軸の対応と数値の詳細を出す。
   var legend = document.getElementById("chart-legend");
   legend.innerHTML = "";
   if (!traces.length) {
@@ -185,7 +292,7 @@ function renderChartLegend(traces) {
     row.appendChild(swatch);
     var range = trace.min === undefined
       ? "(データなし)"
-      : "現在 " + fixed(trace.latest, 1) +
+      : (trace.axis || "") + "  現在 " + fixed(trace.latest, 1) +
         " / 範囲 " + fixed(trace.min, 1) + " 〜 " + fixed(trace.max, 1);
     row.appendChild(el("span", null, trace.label + "  " + range));
     legend.appendChild(row);
@@ -290,7 +397,7 @@ function onMessage(payload) {
     "t = " + fixed(payload.sim_time, 3) + " s";
   state.nodes = payload.nodes;
   renderStatus(payload.nodes);
-  pushHistory(payload.nodes);
+  pushHistory(payload.nodes, payload.sim_time);
   renderChart(payload.nodes);
 
   updateReplayFromPayload(payload);

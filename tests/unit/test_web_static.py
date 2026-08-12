@@ -283,3 +283,28 @@ def test_traces_of_the_same_unit_share_one_scale():
     js = _read("app.js")
     assert "scales[trace.seriesKey]" in js
     assert "seriesKey: series.key" in js
+
+
+def test_chart_has_axes_and_an_in_chart_legend():
+    """グラフ内に凡例、X 軸の時刻ラベル、Y 軸の目盛りを描く。"""
+    js = _read("app.js")
+    for name in ("drawXAxis", "drawYAxis", "drawLegend", "drawGrid", "CHART_MARGIN"):
+        assert name in js
+    # X 軸は推定ではなく実際の sim_time を使う
+    assert "chartTimes" in js
+    assert "pushHistory(payload.nodes, payload.sim_time)" in js
+    assert '" s"' in js
+
+
+def test_y_axis_is_limited_to_two_units_and_says_so():
+    """左右 2 本までしか軸を出せないので、どの軸かを凡例に書く。"""
+    js = _read("app.js")
+    assert "軸なし" in js
+    assert "左軸" in js and "右軸" in js
+
+
+def test_traces_are_right_aligned_to_the_newest_sample():
+    """バッファが満杯になる前でも X 軸ラベルと波形の位置が合うこと。"""
+    js = _read("app.js")
+    assert "values.length - 1 - index" in js
+    assert "chartTimes.length - 1" in js
